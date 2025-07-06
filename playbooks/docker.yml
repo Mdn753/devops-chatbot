@@ -1,12 +1,33 @@
 - hosts: all
   become: yes
   tasks:
-    - name: Install Docker
-      ansible.builtin.shell: curl -fsSL https://get.docker.com | sh
+    - name: Install snapd (if not present)
+      ansible.builtin.apt:
+        name: snapd
+        state: present
+        update_cache: yes
+
+    - name: Ensure snap core is up-to-date
+      ansible.builtin.command: snap refresh core
+      changed_when: false             # doesn’t harm idempotency
+
+    - name: Install Docker from Snap
+      ansible.builtin.command: snap install docker
       args:
-        creates: /usr/bin/docker
+        creates: /snap/bin/docker
+
+    - name: Ensure docker group exists (Snap creates it, but be safe)
+      ansible.builtin.group:
+        name: docker
+        state: present
+
     - name: Add ansible user to docker group
       ansible.builtin.user:
-        name: ansible
+        name: "{{ ansible_user_id | default(ansible_user) }}"
         groups: docker
         append: yes
+
+    # Optional – expose path for later roles that expect /usr/bin/docker
+    - name: Set fact for docker binary path
+      ansible.builtin.set_fact:
+        docker_path: /snap/bin/docker
