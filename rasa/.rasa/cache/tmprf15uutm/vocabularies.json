@@ -1,0 +1,52 @@
+{
+  "text": {
+    "spin": 13,
+    "a": 0,
+    "new": 10,
+    "vm": 16,
+    "create": 2,
+    "dev": 3,
+    "launch": 6,
+    "ubuntu": 14,
+    "server": 12,
+    "provision": 11,
+    "fresh": 5,
+    "virtual": 15,
+    "machine": 7,
+    "make": 8,
+    "an": 1,
+    "for": 4,
+    "me": 9
+  },
+  "intent": {
+    "create_vm": 1,
+    "affirm": 0,
+    "deny": 2,
+    "greet": 3,
+    "mood_great": 4,
+    "mood_unhappy": 5
+  },
+  "response": null,
+  "action_name": {
+    "action_listen": 7,
+    "action_restart": 8,
+    "action_session_start": 10,
+    "action_default_fallback": 5,
+    "action_deactivate_loop": 2,
+    "action_revert_fallback_events": 9,
+    "action_default_ask_affirmation": 3,
+    "action_default_ask_rephrase": 4,
+    "action_two_stage_fallback": 11,
+    "action_unlikely_intent": 12,
+    "action_back": 0,
+    "action_extract_slots": 6,
+    "action_create_vm": 1,
+    "utter_cheer_up": 13,
+    "utter_did_that_help": 14,
+    "utter_goodbye": 15,
+    "utter_greet": 16,
+    "utter_happy": 17
+  },
+  "action_text": null,
+  "intent_response_key": null
+}

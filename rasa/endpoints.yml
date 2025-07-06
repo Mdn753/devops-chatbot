@@ -43,5 +43,6 @@
 
 
 action_endpoint:
-  url: "http://rasa:5055/webhook"
+  url: "http://rasa_actions:5055/webhook"
+
 

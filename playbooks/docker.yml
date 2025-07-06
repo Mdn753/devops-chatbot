@@ -1,24 +1,38 @@
+---
 - hosts: all
   become: yes
+  gather_facts: yes
+
   tasks:
+    # 1. Ensure snapd is on the box
     - name: Install snapd
       ansible.builtin.apt:
         name: snapd
         state: present
         update_cache: yes
 
-
-
+    # 2. Install the Docker snap (idempotent, with retry if another snap op is running)
     - name: Install Docker from Snap
       ansible.builtin.command: snap install docker
       args:
-        creates: /snap/bin/docker
+        creates: /snap/bin/docker                # keeps task idempotent
+      register: snap_install
+      retries: 3                                 # retry if “install-snap change in progress”
+      delay: 30
+      until: snap_install.rc == 0
 
+    # 3. Wait for SSH to come back if snapd restarted it
+    - name: Wait until SSH is available again
+      wait_for_connection:
+        timeout: 300
+
+    # 4. Make sure the docker group exists (Snap usually creates it—be explicit)
     - name: Ensure docker group exists
       ansible.builtin.group:
         name: docker
         state: present
 
+    # 5. Add the current Ansible user to the docker group
     - name: Add ansible user to docker group
       ansible.builtin.user:
         name: "{{ ansible_user_id | default(ansible_user) }}"

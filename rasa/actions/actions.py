@@ -32,7 +32,7 @@ from rasa_sdk import Action, Tracker
 from rasa_sdk.executor import CollectingDispatcher
 
 N8N_URL = os.getenv("N8N_WEBHOOK_URL",
-                    "http://n8n:5678/webhook/create_vm")
+                    "http://host.docker.internal:5678/webhook-test/create_vm")
 
 class ActionCreateVM(Action):
     def name(self):

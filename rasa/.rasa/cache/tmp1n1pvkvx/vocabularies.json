@@ -1,0 +1,46 @@
+{
+  "text": {
+    "hello": 6,
+    "hi": 8,
+    "hey": 7,
+    "there": 14,
+    "good": 5,
+    "morning": 11,
+    "spin": 13,
+    "a": 0,
+    "new": 12,
+    "vm": 18,
+    "create": 2,
+    "an": 1,
+    "ubuntu": 15,
+    "launch": 9,
+    "fresh": 4,
+    "virtual": 17,
+    "machine": 10,
+    "up": 16,
+    "dev": 3,
+    "vm01": 19
+  },
+  "intent": {
+    "greet": 1,
+    "create_vm": 0
+  },
+  "response": null,
+  "action_name": {
+    "action_listen": 7,
+    "action_restart": 8,
+    "action_session_start": 10,
+    "action_default_fallback": 5,
+    "action_deactivate_loop": 2,
+    "action_revert_fallback_events": 9,
+    "action_default_ask_affirmation": 3,
+    "action_default_ask_rephrase": 4,
+    "action_two_stage_fallback": 11,
+    "action_unlikely_intent": 12,
+    "action_back": 0,
+    "action_extract_slots": 6,
+    "action_create_vm": 1
+  },
+  "action_text": null,
+  "intent_response_key": null
+}
