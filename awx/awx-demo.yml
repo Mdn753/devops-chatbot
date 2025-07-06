@@ -1,0 +1,9 @@
+apiVersion: awx.ansible.com/v1beta1
+kind: AWX
+metadata:
+  name: awx-demo
+  namespace: awx
+spec:
+  service_type: NodePort
+  # ingress_type: ingress     # <-- uncomment if you've set up an Ingress controller
+  # hostname: awx.local       # <-- if using ingress, set your FQDN here

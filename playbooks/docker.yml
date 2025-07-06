@@ -1,0 +1,12 @@
+- hosts: all
+  become: yes
+  tasks:
+    - name: Install Docker
+      ansible.builtin.shell: curl -fsSL https://get.docker.com | sh
+      args:
+        creates: /usr/bin/docker
+    - name: Add ansible user to docker group
+      ansible.builtin.user:
+        name: ansible
+        groups: docker
+        append: yes

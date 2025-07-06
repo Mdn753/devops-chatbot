@@ -1,0 +1,23 @@
+services:
+  rasa:
+    image: rasa/rasa:3.6.21-full
+    command: run --enable-api --cors "*" --debug
+    volumes:
+      - ./rasa:/app
+    ports: ["5005:5005"]
+
+  n8n:
+    image: n8nio/n8n:1.101.1
+    environment:
+      GENERIC_TIMEZONE: Africa/Casablanca
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - ./n8n:/files
+    ports: ["5678:5678"]
+
+
+
+volumes:
+  n8n_data:
+
+
