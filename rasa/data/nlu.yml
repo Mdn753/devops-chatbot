@@ -1,7 +1,7 @@
 version: "3.1"
 
 nlu:
-# --------- GREET ----------
+
 - intent: greet
   examples: |
     - hello
@@ -9,7 +9,6 @@ nlu:
     - hey there
     - good morning
 
-# --------- CREATE VM ----------
 - intent: create_vm
   examples: |
     - spin a new vm
