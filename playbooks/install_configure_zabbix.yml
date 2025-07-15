@@ -1,0 +1,77 @@
+- name: Install and configure Zabbix
+  hosts: all
+  become: yes
+  tasks:
+    - name: Install Zabbix repository
+      ansible.builtin.yum:
+        name: https://repo.zabbix.com/zabbix/5.0/rhel/7/x86_64/zabbix-release-5.0-1.el7.noarch.rpm
+        state: present
+
+    - name: Install Zabbix server, frontend, and agent
+      ansible.builtin.yum:
+        name:
+          - zabbix-server-mysql
+          - zabbix-web-mysql
+          - zabbix-agent
+        state: present
+
+    - name: Install MariaDB
+      ansible.builtin.yum:
+        name: mariadb-server
+        state: present
+
+    - name: Start and enable MariaDB service
+      ansible.builtin.service:
+        name: mariadb
+        state: started
+        enabled: yes
+
+    - name: Create Zabbix database
+      ansible.builtin.mysql_db:
+        name: zabbix
+        state: present
+        login_user: root
+
+    - name: Create Zabbix database user
+      ansible.builtin.mysql_user:
+        name: zabbix
+        password: zabbix_password
+        priv: 'zabbix.*:ALL'
+        state: present
+        login_user: root
+
+    - name: Import initial schema and data
+      ansible.builtin.command: >
+        mysql -u zabbix -pzabbix_password zabbix < /usr/share/doc/zabbix-server-mysql*/create.sql.gz
+      args:
+        creates: /var/lib/mysql/zabbix
+
+    - name: Configure Zabbix server
+      ansible.builtin.lineinfile:
+        path: /etc/zabbix/zabbix_server.conf
+        regexp: '^# DBPassword='
+        line: 'DBPassword=zabbix_password'
+
+    - name: Start and enable Zabbix server
+      ansible.builtin.service:
+        name: zabbix-server
+        state: started
+        enabled: yes
+
+    - name: Start and enable Zabbix agent
+      ansible.builtin.service:
+        name: zabbix-agent
+        state: started
+        enabled: yes
+
+    - name: Configure PHP for Zabbix frontend
+      ansible.builtin.lineinfile:
+        path: /etc/httpd/conf.d/zabbix.conf
+        regexp: '^php_value date.timezone'
+        line: 'php_value date.timezone Europe/Riga'
+
+    - name: Start and enable Apache
+      ansible.builtin.service:
+        name: httpd
+        state: started
+        enabled: yes
