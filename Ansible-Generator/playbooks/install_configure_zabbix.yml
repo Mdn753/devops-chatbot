@@ -5,20 +5,25 @@
   gather_facts: yes
 
   collections:
-    - community.mysql          # ← MySQL/MariaDB modules
+    - community.mysql
 
   vars:
-    zabbix_version: "5.0"      # LTS branch
+    zabbix_version: "5.0"
     zabbix_db_name: zabbix
     zabbix_db_user: zabbix
     zabbix_db_pass: zabbix_password
     php_timezone: Africa/Casablanca
 
+    # keyed once, reused later
+    zbx_key_url:  https://repo.zabbix.com/zabbix-official-repo.key
+    zbx_key_asc:  /usr/share/keyrings/zabbix.asc
+    zbx_keyring:  /usr/share/keyrings/zabbix.gpg
+
   tasks:
-  # ──────────────────────────────────────────────
-  # Repositories & keys
-  # ──────────────────────────────────────────────
-  - name: Add Zabbix repo (Red Hat family)
+  # ────────────────────────────────────────────────
+  # Repository / key
+  # ────────────────────────────────────────────────
+  - name: Add Zabbix repo on RHEL family
     ansible.builtin.yum:
       name: >-
         https://repo.zabbix.com/zabbix/{{ zabbix_version }}/rhel/
@@ -27,31 +32,37 @@
       state: present
     when: ansible_os_family == "RedHat"
 
-  - name: Enable EPEL (Red Hat family)
+  - name: Enable EPEL (RHEL family)
     ansible.builtin.yum:
       name: epel-release
       state: present
     when: ansible_os_family == "RedHat"
 
-  - name: Ensure gnupg is present (Debian/Ubuntu)
+  - name: Ensure gnupg present (Debian/Ubuntu)
     ansible.builtin.apt:
       name: gnupg
       state: present
       update_cache: yes
     when: ansible_os_family == "Debian"
 
-  - name: Install Zabbix GPG key (Debian/Ubuntu, no apt-key)
-    ansible.builtin.apt_key:
-      url: https://repo.zabbix.com/zabbix-official-repo.key
-      keyring: /usr/share/keyrings/zabbix.gpg
-      dearmor: yes
-      state: present
+  - name: Download Zabbix ASCII key (Debian/Ubuntu)
+    ansible.builtin.get_url:
+      url:  "{{ zbx_key_url }}"
+      dest: "{{ zbx_key_asc }}"
+      mode: "0644"
+    when: ansible_os_family == "Debian"
+
+  - name: Convert key to gpg keyring (Debian/Ubuntu)
+    ansible.builtin.command: >
+      gpg --dearmor -o {{ zbx_keyring }} {{ zbx_key_asc }}
+    args:
+      creates: "{{ zbx_keyring }}"
     when: ansible_os_family == "Debian"
 
   - name: Add Zabbix apt repository (Debian/Ubuntu)
     ansible.builtin.apt_repository:
       repo: >-
-        deb [arch=amd64 signed-by=/usr/share/keyrings/zabbix.gpg]
+        deb [arch=amd64 signed-by={{ zbx_keyring }}]
         https://repo.zabbix.com/zabbix/{{ zabbix_version }}/{{ ansible_distribution | lower }}
         {{ ansible_distribution_release }} main
       filename: zabbix
@@ -59,9 +70,9 @@
       update_cache: yes
     when: ansible_os_family == "Debian"
 
-  # ──────────────────────────────────────────────
-  # Package installation
-  # ──────────────────────────────────────────────
+  # ────────────────────────────────────────────────
+  # Packages
+  # ────────────────────────────────────────────────
   - name: Install Zabbix server, frontend, agent, MariaDB & driver
     ansible.builtin.package:
       name:
@@ -73,10 +84,10 @@
       state: present
       update_cache: yes
 
-  # ──────────────────────────────────────────────
-  # Database setup
-  # ──────────────────────────────────────────────
-  - name: Ensure MariaDB is running
+  # ────────────────────────────────────────────────
+  # Database
+  # ────────────────────────────────────────────────
+  - name: Ensure MariaDB running
     ansible.builtin.service:
       name: mariadb
       state: started
@@ -104,9 +115,9 @@
     args:
       creates: /var/lib/mysql/{{ zabbix_db_name }}/users.ibd
 
-  # ──────────────────────────────────────────────
+  # ────────────────────────────────────────────────
   # Configuration tweaks
-  # ──────────────────────────────────────────────
+  # ────────────────────────────────────────────────
   - name: Set DBPassword in zabbix_server.conf
     ansible.builtin.lineinfile:
       path: /etc/zabbix/zabbix_server.conf
@@ -124,10 +135,10 @@
       line: "php_value date.timezone {{ php_timezone }}"
     notify: restart web
 
-  # ──────────────────────────────────────────────
+  # ────────────────────────────────────────────────
   # Services
-  # ──────────────────────────────────────────────
-  - name: Start & enable Zabbix, agent, web
+  # ────────────────────────────────────────────────
+  - name: Start & enable Zabbix services
     ansible.builtin.service:
       name: "{{ item }}"
       state: started
