@@ -4,73 +4,69 @@
   become: yes
   gather_facts: yes
 
-  collections:           # we still need the MySQL collection
-    - community.mysql
+  collections:
+    - community.mysql         # MySQL/MariaDB modules
 
   vars:
-    zabbix_version: "5.0"
+    zabbix_version: "5.0"     # LTS branch you want
 
     zabbix_db_name: zabbix
     zabbix_db_user: zabbix
     zabbix_db_pass: zabbix_password
-
     php_timezone: Africa/Casablanca
 
   tasks:
-  # ───────────────────────────────────────────────────────────────────
-  # Detect platform
-  # ───────────────────────────────────────────────────────────────────
-  - name: Set OS-specific variables
-    ansible.builtin.set_fact:
-      zabbix_repo_pkg: |
-        {% if ansible_os_family == 'RedHat' %}
-        https://repo.zabbix.com/zabbix/{{ zabbix_version }}/rhel/{{ ansible_distribution_major_version }}/x86_64/zabbix-release-{{ zabbix_version }}-1.el{{ ansible_distribution_major_version }}.noarch.rpm
-        {% elif ansible_os_family == 'Debian' %}
-        https://repo.zabbix.com/zabbix/{{ zabbix_version }}/{{ ansible_distribution | lower }}/pool/main/z/zabbix-release/zabbix-release_{{ zabbix_version }}-1+{{ ansible_distribution | lower }}{{ ansible_distribution_major_version }}_all.deb
-        {% endif %}
-      mysql_driver_pkg: "{{ 'python3-PyMySQL' if ansible_os_family == 'RedHat' else 'python3-pymysql' }}"
-      web_server_pkg:   "{{ 'httpd' if ansible_os_family == 'RedHat' else 'apache2' }}"
-
-  # ───────────────────────────────────────────────────────────────────
-  # Add Zabbix repository
-  # ───────────────────────────────────────────────────────────────────
-  - name: Install Zabbix repo package (RedHat)
+  # ───────────────────────────────────────────────────────────────
+  # Repo + key setup
+  # ───────────────────────────────────────────────────────────────
+  - name: Add Zabbix repo on RedHat family
     ansible.builtin.yum:
-      name: "{{ zabbix_repo_pkg }}"
+      name: >-
+        https://repo.zabbix.com/zabbix/{{ zabbix_version }}/rhel/
+        {{ ansible_distribution_major_version }}/x86_64/
+        zabbix-release-{{ zabbix_version }}-1.el{{ ansible_distribution_major_version }}.noarch.rpm
       state: present
     when: ansible_os_family == 'RedHat'
 
-  - name: Install Zabbix repo package (Debian)
-    ansible.builtin.apt:
-      deb: "{{ zabbix_repo_pkg }}"
-      state: present
-      update_cache: yes
-    when: ansible_os_family == 'Debian'
-
-  # EPEL is only for RHEL-like OSes
-  - name: Enable EPEL (RedHat only)
+  - name: Enable EPEL on RedHat family (for PyMySQL, etc.)
     ansible.builtin.yum:
       name: epel-release
       state: present
     when: ansible_os_family == 'RedHat'
 
-  # ───────────────────────────────────────────────────────────────────
-  # Install packages common to both families
-  # ───────────────────────────────────────────────────────────────────
-  - name: Install Zabbix server, frontend, agent and deps
+  - name: Add Zabbix GPG key (Debian/Ubuntu)
+    ansible.builtin.apt_key:
+      url: https://repo.zabbix.com/zabbix-official-repo.key
+      state: present
+    when: ansible_os_family == 'Debian'
+
+  - name: Add Zabbix apt repository (Debian/Ubuntu)
+    ansible.builtin.apt_repository:
+      repo: >-
+        deb [arch=amd64] https://repo.zabbix.com/zabbix/{{ zabbix_version }}/{{ ansible_distribution | lower }}
+        {{ ansible_distribution_release }} main
+      filename: zabbix
+      state: present
+      update_cache: yes
+    when: ansible_os_family == 'Debian'
+
+  # ───────────────────────────────────────────────────────────────
+  # Package installation
+  # ───────────────────────────────────────────────────────────────
+  - name: Install server, frontend, agent, DB & driver
     ansible.builtin.package:
       name:
         - zabbix-server-mysql
         - zabbix-web-mysql
         - zabbix-agent
-        - mariadb-server          # provides MySQL on both families
-        - "{{ mysql_driver_pkg }}" # PyMySQL driver
+        - mariadb-server
+        - "{{ 'python3-PyMySQL' if ansible_os_family == 'RedHat' else 'python3-pymysql' }}"
       state: present
-      update_cache: yes           # safe on both yum & apt
+      update_cache: yes         # safe on both yum/dnf & apt
 
-  # ───────────────────────────────────────────────────────────────────
-  # Database setup
-  # ───────────────────────────────────────────────────────────────────
+  # ───────────────────────────────────────────────────────────────
+  # Database preparation
+  # ───────────────────────────────────────────────────────────────
   - name: Ensure MariaDB is running
     ansible.builtin.service:
       name: mariadb
@@ -92,26 +88,26 @@
       state: present
       login_user: root
 
-  - name: Import initial schema and data
+  - name: Import initial schema
     ansible.builtin.command: >
       bash -c "gunzip -c $(ls /usr/share/doc/zabbix-server-mysql*/create.sql.gz) |
                mysql -u {{ zabbix_db_user }} -p{{ zabbix_db_pass }} {{ zabbix_db_name }}"
     args:
-      creates: /var/lib/mysql/{{ zabbix_db_name }}/users.ibd   # idempotence
+      creates: /var/lib/mysql/{{ zabbix_db_name }}/users.ibd   # idempotent
 
-  # ───────────────────────────────────────────────────────────────────
+  # ───────────────────────────────────────────────────────────────
   # Configuration tweaks
-  # ───────────────────────────────────────────────────────────────────
-  - name: Configure Zabbix server DB password
+  # ───────────────────────────────────────────────────────────────
+  - name: Set DBPassword in zabbix_server.conf
     ansible.builtin.lineinfile:
       path: /etc/zabbix/zabbix_server.conf
       regexp: '^#?DBPassword='
       line: "DBPassword={{ zabbix_db_pass }}"
-    notify: restart zabbix server
+    notify: restart zabbix
 
-  - name: Configure PHP timezone
+  - name: Set PHP timezone for frontend
     ansible.builtin.lineinfile:
-      path: >
+      path: >-
         {{ '/etc/httpd/conf.d/zabbix.conf'
            if ansible_os_family == 'RedHat'
            else '/etc/apache2/conf-enabled/zabbix.conf' }}
@@ -119,10 +115,10 @@
       line: "php_value date.timezone {{ php_timezone }}"
     notify: restart web
 
-  # ───────────────────────────────────────────────────────────────────
-  # Services
-  # ───────────────────────────────────────────────────────────────────
-  - name: Start and enable Zabbix services
+  # ───────────────────────────────────────────────────────────────
+  # Service management
+  # ───────────────────────────────────────────────────────────────
+  - name: Start & enable Zabbix, agent, web
     ansible.builtin.service:
       name: "{{ item }}"
       state: started
@@ -130,15 +126,15 @@
     loop:
       - zabbix-server
       - zabbix-agent
-      - "{{ web_server_pkg }}"
+      - "{{ 'httpd' if ansible_os_family == 'RedHat' else 'apache2' }}"
 
   handlers:
-    - name: restart zabbix server
+    - name: restart zabbix
       ansible.builtin.service:
         name: zabbix-server
         state: restarted
 
     - name: restart web
       ansible.builtin.service:
-        name: "{{ web_server_pkg }}"
+        name: "{{ 'httpd' if ansible_os_family == 'RedHat' else 'apache2' }}"
         state: restarted
