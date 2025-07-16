@@ -2,122 +2,143 @@
 - name: Install and configure Zabbix
   hosts: all
   become: yes
+  gather_facts: yes
 
-  # Tell Ansible up-front which extra collection we need
-  collections:
+  collections:           # we still need the MySQL collection
     - community.mysql
 
   vars:
+    zabbix_version: "5.0"
+
     zabbix_db_name: zabbix
     zabbix_db_user: zabbix
     zabbix_db_pass: zabbix_password
-    php_timezone: Africa/Casablanca   # change if you’re in a different zone
+
+    php_timezone: Africa/Casablanca
 
   tasks:
-    # ---------------------------------------------------------------------
-    # Package installation
-    # ---------------------------------------------------------------------
-    - name: Enable EPEL (needed for PyMySQL on RHEL/CentOS 7)
-      ansible.builtin.yum:
-        name: epel-release
-        state: present
+  # ───────────────────────────────────────────────────────────────────
+  # Detect platform
+  # ───────────────────────────────────────────────────────────────────
+  - name: Set OS-specific variables
+    ansible.builtin.set_fact:
+      zabbix_repo_pkg: |
+        {% if ansible_os_family == 'RedHat' %}
+        https://repo.zabbix.com/zabbix/{{ zabbix_version }}/rhel/{{ ansible_distribution_major_version }}/x86_64/zabbix-release-{{ zabbix_version }}-1.el{{ ansible_distribution_major_version }}.noarch.rpm
+        {% elif ansible_os_family == 'Debian' %}
+        https://repo.zabbix.com/zabbix/{{ zabbix_version }}/{{ ansible_distribution | lower }}/pool/main/z/zabbix-release/zabbix-release_{{ zabbix_version }}-1+{{ ansible_distribution | lower }}{{ ansible_distribution_major_version }}_all.deb
+        {% endif %}
+      mysql_driver_pkg: "{{ 'python3-PyMySQL' if ansible_os_family == 'RedHat' else 'python3-pymysql' }}"
+      web_server_pkg:   "{{ 'httpd' if ansible_os_family == 'RedHat' else 'apache2' }}"
 
-    - name: Install Zabbix repository
-      ansible.builtin.yum:
-        name: https://repo.zabbix.com/zabbix/5.0/rhel/7/x86_64/zabbix-release-5.0-1.el7.noarch.rpm
-        state: present
+  # ───────────────────────────────────────────────────────────────────
+  # Add Zabbix repository
+  # ───────────────────────────────────────────────────────────────────
+  - name: Install Zabbix repo package (RedHat)
+    ansible.builtin.yum:
+      name: "{{ zabbix_repo_pkg }}"
+      state: present
+    when: ansible_os_family == 'RedHat'
 
-    - name: Install Zabbix server, frontend and agent
-      ansible.builtin.yum:
-        name:
-          - zabbix-server-mysql
-          - zabbix-web-mysql
-          - zabbix-agent
-        state: present
+  - name: Install Zabbix repo package (Debian)
+    ansible.builtin.apt:
+      deb: "{{ zabbix_repo_pkg }}"
+      state: present
+      update_cache: yes
+    when: ansible_os_family == 'Debian'
 
-    - name: Install MariaDB server and Python DB bindings
-      ansible.builtin.yum:
-        name:
-          - mariadb-server
-          - python3-PyMySQL          # community.mysql needs a driver
-        state: present
+  # EPEL is only for RHEL-like OSes
+  - name: Enable EPEL (RedHat only)
+    ansible.builtin.yum:
+      name: epel-release
+      state: present
+    when: ansible_os_family == 'RedHat'
 
-    # ---------------------------------------------------------------------
-    # Database setup
-    # ---------------------------------------------------------------------
-    - name: Start and enable MariaDB
-      ansible.builtin.service:
-        name: mariadb
-        state: started
-        enabled: yes
+  # ───────────────────────────────────────────────────────────────────
+  # Install packages common to both families
+  # ───────────────────────────────────────────────────────────────────
+  - name: Install Zabbix server, frontend, agent and deps
+    ansible.builtin.package:
+      name:
+        - zabbix-server-mysql
+        - zabbix-web-mysql
+        - zabbix-agent
+        - mariadb-server          # provides MySQL on both families
+        - "{{ mysql_driver_pkg }}" # PyMySQL driver
+      state: present
+      update_cache: yes           # safe on both yum & apt
 
-    - name: Create Zabbix database
-      community.mysql.mysql_db:
-        name: "{{ zabbix_db_name }}"
-        state: present
-        login_user: root
+  # ───────────────────────────────────────────────────────────────────
+  # Database setup
+  # ───────────────────────────────────────────────────────────────────
+  - name: Ensure MariaDB is running
+    ansible.builtin.service:
+      name: mariadb
+      state: started
+      enabled: yes
 
-    - name: Create Zabbix DB user
-      community.mysql.mysql_user:
-        name: "{{ zabbix_db_user }}"
-        password: "{{ zabbix_db_pass }}"
-        priv: "{{ zabbix_db_name }}.*:ALL"
-        host: localhost
-        state: present
-        login_user: root
+  - name: Create Zabbix database
+    community.mysql.mysql_db:
+      name: "{{ zabbix_db_name }}"
+      state: present
+      login_user: root
 
-    - name: Import initial schema and data
-      ansible.builtin.command: >
-        bash -c "gunzip -c $(ls /usr/share/doc/zabbix-server-mysql*/create.sql.gz) |
-                 mysql -u {{ zabbix_db_user }} -p{{ zabbix_db_pass }} {{ zabbix_db_name }}"
-      args:
-        creates: /var/lib/mysql/{{ zabbix_db_name }}/users.frm
+  - name: Create Zabbix DB user
+    community.mysql.mysql_user:
+      name: "{{ zabbix_db_user }}"
+      password: "{{ zabbix_db_pass }}"
+      priv: "{{ zabbix_db_name }}.*:ALL"
+      host: localhost
+      state: present
+      login_user: root
 
-    # ---------------------------------------------------------------------
-    # Zabbix & web stack configuration
-    # ---------------------------------------------------------------------
-    - name: Configure Zabbix server DB password
-      ansible.builtin.lineinfile:
-        path: /etc/zabbix/zabbix_server.conf
-        regexp: '^#?DBPassword='
-        line: "DBPassword={{ zabbix_db_pass }}"
-      notify: Restart Zabbix server
+  - name: Import initial schema and data
+    ansible.builtin.command: >
+      bash -c "gunzip -c $(ls /usr/share/doc/zabbix-server-mysql*/create.sql.gz) |
+               mysql -u {{ zabbix_db_user }} -p{{ zabbix_db_pass }} {{ zabbix_db_name }}"
+    args:
+      creates: /var/lib/mysql/{{ zabbix_db_name }}/users.ibd   # idempotence
 
-    - name: Configure PHP timezone for Zabbix frontend
-      ansible.builtin.lineinfile:
-        path: /etc/httpd/conf.d/zabbix.conf
-        regexp: '^php_value date.timezone'
-        line: "php_value date.timezone {{ php_timezone }}"
-      notify: Restart Apache
+  # ───────────────────────────────────────────────────────────────────
+  # Configuration tweaks
+  # ───────────────────────────────────────────────────────────────────
+  - name: Configure Zabbix server DB password
+    ansible.builtin.lineinfile:
+      path: /etc/zabbix/zabbix_server.conf
+      regexp: '^#?DBPassword='
+      line: "DBPassword={{ zabbix_db_pass }}"
+    notify: restart zabbix server
 
-    # ---------------------------------------------------------------------
-    # Services
-    # ---------------------------------------------------------------------
-    - name: Start and enable Zabbix server
-      ansible.builtin.service:
-        name: zabbix-server
-        state: started
-        enabled: yes
+  - name: Configure PHP timezone
+    ansible.builtin.lineinfile:
+      path: >
+        {{ '/etc/httpd/conf.d/zabbix.conf'
+           if ansible_os_family == 'RedHat'
+           else '/etc/apache2/conf-enabled/zabbix.conf' }}
+      regexp: '^php_value date.timezone'
+      line: "php_value date.timezone {{ php_timezone }}"
+    notify: restart web
 
-    - name: Start and enable Zabbix agent
-      ansible.builtin.service:
-        name: zabbix-agent
-        state: started
-        enabled: yes
-
-    - name: Start and enable Apache
-      ansible.builtin.service:
-        name: httpd
-        state: started
-        enabled: yes
+  # ───────────────────────────────────────────────────────────────────
+  # Services
+  # ───────────────────────────────────────────────────────────────────
+  - name: Start and enable Zabbix services
+    ansible.builtin.service:
+      name: "{{ item }}"
+      state: started
+      enabled: yes
+    loop:
+      - zabbix-server
+      - zabbix-agent
+      - "{{ web_server_pkg }}"
 
   handlers:
-    - name: Restart Zabbix server
+    - name: restart zabbix server
       ansible.builtin.service:
         name: zabbix-server
         state: restarted
 
-    - name: Restart Apache
+    - name: restart web
       ansible.builtin.service:
-        name: httpd
+        name: "{{ web_server_pkg }}"
         state: restarted
