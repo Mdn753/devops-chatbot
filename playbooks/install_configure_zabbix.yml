@@ -131,7 +131,14 @@
       state: started
       timeout: 30
 
-  - name: Secure MariaDB installation (set root password)
+  - name: Check if MariaDB root password is set
+    community.mysql.mysql_info:
+      login_user: root
+      login_unix_socket: "{{ mysql_socket }}"
+    register: mysql_root_check
+    ignore_errors: true
+
+  - name: Set MariaDB root password if not already set
     community.mysql.mysql_user:
       name: root
       host: localhost
@@ -139,13 +146,14 @@
       login_user: root
       login_unix_socket: "{{ mysql_socket }}"
       state: present
-    ignore_errors: true
+    when: mysql_root_check is succeeded
 
   - name: Create Zabbix database
     community.mysql.mysql_db:
       name: "{{ zabbix_db_name }}"
       state: present
       login_user: root
+      login_password: "{{ zabbix_db_pass if mysql_root_check is failed else omit }}"
       login_unix_socket: "{{ mysql_socket }}"
       encoding: utf8
       collation: utf8_general_ci
@@ -159,6 +167,7 @@
       priv: "{{ zabbix_db_name }}.*:ALL"
       state: present
       login_user: root
+      login_password: "{{ zabbix_db_pass if mysql_root_check is failed else omit }}"
       login_unix_socket: "{{ mysql_socket }}"
 
   - name: Check if Zabbix schema already imported
@@ -179,7 +188,7 @@
   - name: Import initial Zabbix schema (only if not exists)
     ansible.builtin.shell: |
       gzip -dc "{{ schema_file.files[0].path }}" | \
-      mysql --socket={{ mysql_socket }} -u root {{ zabbix_db_name }}
+      mysql --socket={{ mysql_socket }} -u root {{ '-p' + zabbix_db_pass if mysql_root_check is failed else '' }} {{ zabbix_db_name }}
     when: 
       - not schema_check.stat.exists
       - schema_file.files | length > 0
@@ -189,6 +198,7 @@
   - name: Verify schema import
     community.mysql.mysql_query:
       login_user: root
+      login_password: "{{ zabbix_db_pass if mysql_root_check is failed else omit }}"
       login_unix_socket: "{{ mysql_socket }}"
       login_db: "{{ zabbix_db_name }}"
       query: "SHOW TABLES LIKE 'users'"
