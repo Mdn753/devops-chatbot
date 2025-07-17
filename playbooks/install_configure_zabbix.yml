@@ -206,21 +206,77 @@
     loop_control:
       loop_var: item
 
-  - name: Alternative schema file search (fallback)
+  - name: Debug - List contents of zabbix-server-mysql directory
     ansible.builtin.shell: |
-      find /usr/share -name "create.sql.gz" -path "*/zabbix-server-mysql*" 2>/dev/null | head -1
-    register: schema_fallback
-    when: 
-      - not schema_check.stat.exists
-      - schema_file_path is not defined
+      ls -la /usr/share/doc/zabbix-server-mysql* 2>/dev/null || echo "Directory not found"
+    register: debug_dir_contents
+    when: not schema_check.stat.exists
 
-  - name: Set fallback schema file path
+  - name: Debug - Search for any SQL files
+    ansible.builtin.shell: |
+      find /usr/share -name "*.sql*" -path "*zabbix*" 2>/dev/null || echo "No SQL files found"
+    register: debug_sql_search
+    when: not schema_check.stat.exists
+
+  - name: Debug - Check for schema in package files
+    ansible.builtin.shell: |
+      rpm -ql zabbix-server-mysql 2>/dev/null | grep -E "\.(sql|gz)$" || 
+      dpkg -L zabbix-server-mysql 2>/dev/null | grep -E "\.(sql|gz)$" || 
+      echo "No schema files found in package"
+    register: debug_package_files
+    when: not schema_check.stat.exists
+
+  - name: Display debug information
+    ansible.builtin.debug:
+      msg: |
+        Directory contents: {{ debug_dir_contents.stdout }}
+        SQL files search: {{ debug_sql_search.stdout }}
+        Package files: {{ debug_package_files.stdout }}
+    when: not schema_check.stat.exists
+
+  - name: Alternative schema file search (comprehensive)
+    ansible.builtin.shell: |
+      # Try multiple possible locations
+      for path in \
+        "/usr/share/doc/zabbix-server-mysql/create.sql.gz" \
+        "/usr/share/doc/zabbix-server-mysql*/create.sql.gz" \
+        "/usr/share/zabbix-server-mysql/create.sql.gz" \
+        "/usr/share/zabbix/database/mysql/create.sql.gz" \
+        "/usr/share/doc/zabbix-server-mysql-*/create.sql.gz"
+      do
+        if [ -f "$path" ]; then
+          echo "$path"
+          exit 0
+        fi
+      done
+      
+      # If not found, try to find it anywhere
+      find /usr/share -name "create.sql.gz" -path "*zabbix*" 2>/dev/null | head -1
+    register: schema_comprehensive_search
+    when: not schema_check.stat.exists
+
+  - name: Set comprehensive schema file path
     ansible.builtin.set_fact:
-      schema_file_path: "{{ schema_fallback.stdout }}"
+      schema_file_path: "{{ schema_comprehensive_search.stdout }}"
     when: 
       - not schema_check.stat.exists
-      - schema_file_path is not defined
-      - schema_fallback.stdout != ""
+      - schema_comprehensive_search.stdout != ""
+
+  - name: Try to create schema manually if file not found
+    ansible.builtin.shell: |
+      # Check if we can get schema from zabbix_server binary
+      if command -v zabbix_server >/dev/null 2>&1; then
+        echo "CREATE DATABASE IF NOT EXISTS {{ zabbix_db_name }} CHARACTER SET utf8 COLLATE utf8_bin;" | \
+        mysql --socket={{ mysql_socket }} -u root {{ '-p' + zabbix_db_pass if mysql_root_check is failed else '' }}
+        
+        # Try to initialize with zabbix_server if available
+        /usr/sbin/zabbix_server -c /etc/zabbix/zabbix_server.conf --runtime-control config_cache_reload 2>/dev/null || true
+      fi
+    when: 
+      - not schema_check.stat.exists
+      - schema_file_path is not defined or schema_file_path == ""
+    register: manual_schema_attempt
+    ignore_errors: true
 
   - name: Import initial Zabbix schema (only if not exists)
     ansible.builtin.shell: |
@@ -239,15 +295,34 @@
       login_password: "{{ zabbix_db_pass if mysql_root_check is failed else omit }}"
       login_unix_socket: "{{ mysql_socket }}"
       login_db: "{{ zabbix_db_name }}"
-      query: "SHOW TABLES LIKE 'users'"
+      query: "SHOW TABLES"
     register: schema_verify
+
+  - name: Display available tables
+    ansible.builtin.debug:
+      msg: "Available tables: {{ schema_verify.query_result }}"
+    when: schema_verify.query_result is defined
+
+  - name: Check for critical Zabbix tables
+    community.mysql.mysql_query:
+      login_user: root
+      login_password: "{{ zabbix_db_pass if mysql_root_check is failed else omit }}"
+      login_unix_socket: "{{ mysql_socket }}"
+      login_db: "{{ zabbix_db_name }}"
+      query: "SELECT COUNT(*) as count FROM information_schema.tables WHERE table_schema = '{{ zabbix_db_name }}' AND table_name IN ('users', 'hosts', 'items')"
+    register: critical_tables_check
 
   - name: Fail if schema not properly imported
     ansible.builtin.fail:
-      msg: "Zabbix database schema was not imported correctly. Schema file path: {{ schema_file_path | default('NOT FOUND') }}"
+      msg: |
+        Zabbix database schema was not imported correctly. 
+        Schema file path: {{ schema_file_path | default('NOT FOUND') }}
+        Critical tables found: {{ critical_tables_check.query_result[0]['count'] if critical_tables_check.query_result is defined else 'UNKNOWN' }}
+        Total tables: {{ schema_verify.rowcount[0] if schema_verify.rowcount is defined else 'UNKNOWN' }}
     when: 
-      - schema_verify.rowcount[0] == 0
       - not schema_check.stat.exists
+      - critical_tables_check.query_result is defined
+      - critical_tables_check.query_result[0]['count'] < 3
 
   # ───────────────────────────────────────────────────────────
   # Zabbix server configuration  (TCP on localhost)
