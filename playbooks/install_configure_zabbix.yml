@@ -5,15 +5,14 @@
   gather_facts: yes
 
   collections:
-    - community.mysql
+    - community.mysql       # ← makes mysql_db / mysql_user available
 
   vars:
-    # ── Versions & credentials ───────────────────────────
+    # ── Zabbix & database settings ───────────────────────
     zabbix_version: "5.0"
     zabbix_db_name: zabbix
     zabbix_db_user: zabbix
-    zabbix_db_pass: zabbix_password        # <-- change in vault/vars!
-    zabbix_db_host: localhost
+    zabbix_db_pass: zabbix_password        # ‼  vault or override for prod
     php_timezone:  Africa/Casablanca
 
     # Debian/Ubuntu signing-key paths
@@ -23,7 +22,7 @@
 
   tasks:
   # ───────────────────────────────────────────────────────
-  # Repository handling (unchanged) …
+  # Repositories & keys
   # ───────────────────────────────────────────────────────
   - name: Add Zabbix repo (RHEL family)
     ansible.builtin.yum:
@@ -47,7 +46,7 @@
       update_cache: yes
     when: ansible_os_family == "Debian"
 
-  - name: Map Ubuntu codename → series Zabbix {{ zabbix_version }} supports
+  - name: Map Ubuntu codename → Zabbix-supported series
     ansible.builtin.set_fact:
       zbx_ubuntu_series: "{{ {'jammy':'jammy','focal':'focal','bionic':'bionic'}
                              .get(ansible_distribution_release,'jammy') }}"
@@ -79,27 +78,27 @@
     when: ansible_os_family == "Debian"
 
   # ───────────────────────────────────────────────────────
-  # OS-specific facts
+  # OS-specific paths / package names
   # ───────────────────────────────────────────────────────
-  - name: Set family-specific vars
+  - name: Set family-specific variables
     ansible.builtin.set_fact:
       zbx_frontend_pkg: "{{ 'zabbix-web-mysql'
-                            if ansible_os_family=='RedHat'
+                            if ansible_os_family == 'RedHat'
                             else 'zabbix-frontend-php' }}"
       zbx_web_srv:      "{{ 'httpd'
-                            if ansible_os_family=='RedHat'
+                            if ansible_os_family == 'RedHat'
                             else 'apache2' }}"
       zbx_apache_conf:  "{{ '/etc/httpd/conf.d/zabbix.conf'
-                            if ansible_os_family=='RedHat'
+                            if ansible_os_family == 'RedHat'
                             else '/etc/apache2/conf-available/zabbix.conf' }}"
       mysql_socket:     "{{ '/var/lib/mysql/mysql.sock'
-                            if ansible_os_family=='RedHat'
+                            if ansible_os_family == 'RedHat'
                             else '/var/run/mysqld/mysqld.sock' }}"
 
   # ───────────────────────────────────────────────────────
-  # Install packages
+  # Package installation
   # ───────────────────────────────────────────────────────
-  - name: Install Zabbix, MariaDB & dependencies
+  - name: Install Zabbix server, agent, MariaDB & dependencies
     ansible.builtin.package:
       name:
         - zabbix-server-mysql
@@ -107,13 +106,13 @@
         - zabbix-agent
         - mariadb-server
         - "{{ 'python3-PyMySQL'
-              if ansible_os_family=='RedHat'
+              if ansible_os_family == 'RedHat'
               else 'python3-pymysql' }}"
       state: present
       update_cache: yes
 
   # ───────────────────────────────────────────────────────
-  # MariaDB setup
+  # MariaDB initialisation
   # ───────────────────────────────────────────────────────
   - name: Ensure MariaDB running & enabled
     ansible.builtin.service:
@@ -134,17 +133,18 @@
       login_user: root
       login_unix_socket: "{{ mysql_socket }}"
 
-  - name: Create Zabbix DB user
+  - name: Create / update Zabbix DB user (mysql_native_password)
     community.mysql.mysql_user:
       name: "{{ zabbix_db_user }}"
+      host: localhost
       password: "{{ zabbix_db_pass }}"
-      host: "{{ zabbix_db_host }}"
+      plugin: mysql_native_password           # crucial for Zabbix 5.x
       priv: "{{ zabbix_db_name }}.*:ALL"
       state: present
       login_user: root
       login_unix_socket: "{{ mysql_socket }}"
 
-  - name: Import initial schema (idempotent)
+  - name: Import initial Zabbix schema (idempotent)
     ansible.builtin.command: >
       bash -c "gzip -dc $(ls /usr/share/doc/zabbix-server-mysql*/create.sql.gz) |
                mysql --socket={{ mysql_socket }} -u root {{ zabbix_db_name }}"
@@ -152,28 +152,30 @@
       creates: "/var/lib/mysql/{{ zabbix_db_name }}/history.ibd"
 
   # ───────────────────────────────────────────────────────
-  # Zabbix server configuration (must come **before** we start it!)
+  # Zabbix server configuration
   # ───────────────────────────────────────────────────────
-  - name: Configure DB settings in zabbix_server.conf
+  - name: Configure /etc/zabbix/zabbix_server.conf
     ansible.builtin.blockinfile:
       path: /etc/zabbix/zabbix_server.conf
-      marker: "# {mark} ANSIBLE MANAGED BLOCK — DB settings"
+      marker: "# {mark} ANSIBLE MANAGED DB BLOCK"
       block: |
-        DBHost={{ zabbix_db_host }}
+        # Use Unix socket because DB is local
+        DBSocket={{ mysql_socket }}
+
         DBName={{ zabbix_db_name }}
         DBUser={{ zabbix_db_user }}
         DBPassword={{ zabbix_db_pass }}
     notify: restart zabbix-server
 
   # ───────────────────────────────────────────────────────
-  # PHP frontend tweaks
+  # PHP front-end tweaks
   # ───────────────────────────────────────────────────────
   - name: Check Apache conf exists
     ansible.builtin.stat:
       path: "{{ zbx_apache_conf }}"
     register: zbx_conf_stat
 
-  - name: Set PHP timezone in Apache conf
+  - name: Ensure PHP timezone in Apache conf
     ansible.builtin.lineinfile:
       path: "{{ zbx_apache_conf }}"
       regexp: '^php_value +date.timezone'
@@ -182,7 +184,7 @@
     notify: restart webserver
 
   # ───────────────────────────────────────────────────────
-  # Start & enable services (now everything is configured)
+  # Enable & start services
   # ───────────────────────────────────────────────────────
   - name: Enable & start Zabbix services
     ansible.builtin.service:
