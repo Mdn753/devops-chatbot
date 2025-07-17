@@ -131,12 +131,24 @@
       state: started
       timeout: 30
 
+  - name: Secure MariaDB installation (set root password)
+    community.mysql.mysql_user:
+      name: root
+      host: localhost
+      password: "{{ zabbix_db_pass }}"
+      login_user: root
+      login_unix_socket: "{{ mysql_socket }}"
+      state: present
+    ignore_errors: true
+
   - name: Create Zabbix database
     community.mysql.mysql_db:
       name: "{{ zabbix_db_name }}"
       state: present
       login_user: root
       login_unix_socket: "{{ mysql_socket }}"
+      encoding: utf8
+      collation: utf8_general_ci
 
   - name: Create / update Zabbix DB user (mysql_native_password)
     community.mysql.mysql_user:
@@ -149,16 +161,53 @@
       login_user: root
       login_unix_socket: "{{ mysql_socket }}"
 
-  - name: Import initial Zabbix schema (idempotent)
-    ansible.builtin.command: >
-      bash -c "gzip -dc $(ls /usr/share/doc/zabbix-server-mysql*/create.sql.gz) |
-               mysql --socket={{ mysql_socket }} -u root {{ zabbix_db_name }}"
-    args:
-      creates: "/var/lib/mysql/{{ zabbix_db_name }}/history.ibd"
+  - name: Check if Zabbix schema already imported
+    ansible.builtin.stat:
+      path: "/var/lib/mysql/{{ zabbix_db_name }}/history.ibd"
+    register: schema_check
+
+  - name: Find Zabbix schema file
+    ansible.builtin.find:
+      paths: 
+        - /usr/share/doc/zabbix-server-mysql*
+        - /usr/share/zabbix-server-mysql
+      patterns: "create.sql.gz"
+      recurse: true
+    register: schema_file
+    when: not schema_check.stat.exists
+
+  - name: Import initial Zabbix schema (only if not exists)
+    ansible.builtin.shell: |
+      gzip -dc "{{ schema_file.files[0].path }}" | \
+      mysql --socket={{ mysql_socket }} -u root {{ zabbix_db_name }}
+    when: 
+      - not schema_check.stat.exists
+      - schema_file.files | length > 0
+    register: schema_import
+    failed_when: schema_import.rc != 0
+
+  - name: Verify schema import
+    community.mysql.mysql_query:
+      login_user: root
+      login_unix_socket: "{{ mysql_socket }}"
+      login_db: "{{ zabbix_db_name }}"
+      query: "SHOW TABLES LIKE 'users'"
+    register: schema_verify
+
+  - name: Fail if schema not properly imported
+    ansible.builtin.fail:
+      msg: "Zabbix database schema was not imported correctly"
+    when: schema_verify.rowcount[0] == 0
 
   # ───────────────────────────────────────────────────────────
   # Zabbix server configuration  (TCP on localhost)
   # ───────────────────────────────────────────────────────────
+  - name: Stop zabbix-server before configuration
+    ansible.builtin.service:
+      name: zabbix-server
+      state: stopped
+    ignore_errors: true
+
   - name: Configure /etc/zabbix/zabbix_server.conf
     ansible.builtin.blockinfile:
       path: /etc/zabbix/zabbix_server.conf
@@ -169,7 +218,51 @@
         DBName={{ zabbix_db_name }}
         DBUser={{ zabbix_db_user }}
         DBPassword={{ zabbix_db_pass }}
+        StartPollers=5
+        StartTrappers=5
+        StartPingers=1
+        StartDiscoverers=1
+        StartHTTPPollers=1
+        StartTimers=1
+        StartEscalators=1
+        CacheSize=8M
+        HistoryCacheSize=16M
+        HistoryIndexCacheSize=4M
+        TrendCacheSize=4M
+        ValueCacheSize=8M
+        Timeout=4
+        TrapperTimeout=300
+        UnreachablePeriod=45
+        UnavailableDelay=60
+        UnreachableDelay=15
+        AlertScriptsPath=/usr/lib/zabbix/alertscripts
+        ExternalScripts=/usr/lib/zabbix/externalscripts
+        LogFile=/var/log/zabbix/zabbix_server.log
+        LogFileSize=10
+        PidFile=/var/run/zabbix/zabbix_server.pid
+        SocketDir=/var/run/zabbix
+        DBSocket={{ mysql_socket }}
     notify: restart zabbix-server
+
+  - name: Set correct permissions for zabbix directories
+    ansible.builtin.file:
+      path: "{{ item }}"
+      owner: zabbix
+      group: zabbix
+      mode: '0755'
+      state: directory
+    loop:
+      - /var/log/zabbix
+      - /var/run/zabbix
+    ignore_errors: true
+
+  - name: Create zabbix log file with correct permissions
+    ansible.builtin.file:
+      path: /var/log/zabbix/zabbix_server.log
+      owner: zabbix
+      group: zabbix
+      mode: '0644'
+      state: touch
 
   # ───────────────────────────────────────────────────────────
   # PHP front-end timezone tweak
@@ -187,18 +280,63 @@
     when: zbx_conf_stat.stat.exists
     notify: restart webserver
 
+  - name: Enable zabbix apache configuration (Ubuntu/Debian)
+    ansible.builtin.command:
+      cmd: a2enconf zabbix
+    when: 
+      - ansible_os_family == "Debian"
+      - zbx_conf_stat.stat.exists
+    notify: restart webserver
+
   # ───────────────────────────────────────────────────────────
   # Enable & start services
   # ───────────────────────────────────────────────────────────
-  - name: Enable & start Zabbix services
+  - name: Enable & start web server
     ansible.builtin.service:
-      name: "{{ item }}"
+      name: "{{ zbx_web_srv }}"
       state: started
       enabled: true
-    loop:
-      - zabbix-server
-      - zabbix-agent
-      - "{{ zbx_web_srv }}"
+
+  - name: Enable zabbix-server (don't start yet)
+    ansible.builtin.service:
+      name: zabbix-server
+      enabled: true
+
+  - name: Test zabbix-server configuration
+    ansible.builtin.command:
+      cmd: /usr/sbin/zabbix_server -t
+    register: zabbix_test
+    failed_when: zabbix_test.rc != 0
+    changed_when: false
+
+  - name: Start zabbix-server if config is valid
+    ansible.builtin.service:
+      name: zabbix-server
+      state: started
+    when: zabbix_test.rc == 0
+
+  - name: Enable & start zabbix-agent
+    ansible.builtin.service:
+      name: zabbix-agent
+      state: started
+      enabled: true
+
+  - name: Wait for zabbix-server to be ready
+    ansible.builtin.wait_for:
+      port: 10051
+      host: 127.0.0.1
+      delay: 5
+      timeout: 60
+    ignore_errors: true
+
+  - name: Check zabbix-server status
+    ansible.builtin.service:
+      name: zabbix-server
+    register: zabbix_status
+
+  - name: Display zabbix-server status
+    ansible.builtin.debug:
+      msg: "Zabbix server status: {{ zabbix_status.status.ActiveState }}"
 
   # ───────────────────────────────────────────────────────────
   # Handlers
