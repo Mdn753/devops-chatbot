@@ -1,259 +1,150 @@
 ---
-- name: Install & configure Zabbix 5 LTS (MySQL/MariaDB)
+- name: Install & configure Zabbix 5 LTS (MariaDB + Apache/PHP)
   hosts: all
   become: true
   gather_facts: true
 
-  collections:
-    - community.mysql
-
   vars:
-    # ── Zabbix version & DB credentials ─────────────────────
     zabbix_version: "5.0"
 
+    # —— Zabbix DB credentials ————————————————
     zabbix_db_name: zabbix
     zabbix_db_user: zabbix
-    zabbix_db_pass: zabbix_password        # ← vault / override in prod
-
-    # Fallback (only if /etc/mysql/debian.cnf is absent)
-    mysql_root_user: root
-    mysql_root_password: ""                # set if root has a password
+    zabbix_db_pass: zabbix_password   # change / vault in production
 
     php_timezone: Africa/Casablanca
 
-    # Debian/Ubuntu repo-key paths
-    zbx_key_url:  https://repo.zabbix.com/zabbix-official-repo.key
-    zbx_key_asc:  /usr/share/keyrings/zabbix.asc
-    zbx_keyring: /usr/share/keyrings/zabbix.gpg
-
   tasks:
-  # ──────────────────────────────────────────────────────────
-  # 1  Pick an admin login for MariaDB
-  # ──────────────────────────────────────────────────────────
-  - name: Does /etc/mysql/debian.cnf exist?
-    stat:
-      path: /etc/mysql/debian.cnf
-    register: debian_cnf
-
-  - name: mysql_cli  ➜ use debian-sys-maint
-    set_fact:
-      mysql_cli: "mysql --defaults-file=/etc/mysql/debian.cnf --protocol=socket"
-    when: debian_cnf.stat.exists
-
-  - name: mysql_cli  ➜ fall back to root
-    set_fact:
-      mysql_cli: >-
-        mysql --protocol=socket -u{{ mysql_root_user }}{{ ' -p' + mysql_root_password if mysql_root_password|length > 0 else '' }}
-    when: not debian_cnf.stat.exists
-
-  # ──────────────────────────────────────────────────────────
-  # 2  Add Zabbix repositories  (unchanged logic)
-  # ──────────────────────────────────────────────────────────
-  - name: Add Zabbix repo (RHEL)
-    yum:
-      name: >-
-        https://repo.zabbix.com/zabbix/{{ zabbix_version }}/rhel/
-        {{ ansible_distribution_major_version }}/x86_64/
-        zabbix-release-{{ zabbix_version }}-1.el{{ ansible_distribution_major_version }}.noarch.rpm
-      state: present
-    when: ansible_os_family == "RedHat"
-
-  - name: Enable EPEL (RHEL)
-    yum:
-      name: epel-release
-      state: present
-    when: ansible_os_family == "RedHat"
-
-  - name: Ensure gnupg (Debian/Ubuntu)
+  # ------------------------------------------------------------------
+  # 1 — Add the official Zabbix repo & key (Ubuntu / Debian)
+  # ------------------------------------------------------------------
+  - name: Install gnupg & lsb-release
     apt:
-      name: gnupg
+      name: [gnupg, lsb-release]
       state: present
       update_cache: true
-    when: ansible_os_family == "Debian"
 
-  - name: Map Ubuntu codename → supported series
-    set_fact:
-      zbx_ubuntu_series: "{{ {'jammy':'jammy','focal':'focal','bionic':'bionic'}
-                             .get(ansible_distribution_release,'jammy') }}"
-    when: ansible_os_family == "Debian"
+  - name: Add Zabbix signing key
+    apt_key:
+      url: https://repo.zabbix.com/zabbix-official-repo.key
+      state: present
 
-  - name: Download Zabbix ASCII key
-    get_url:
-      url: "{{ zbx_key_url }}"
-      dest: "{{ zbx_key_asc }}"
-      mode: "0644"
-    when: ansible_os_family == "Debian"
-
-  - name: Convert key to keyring
-    command: "gpg --dearmor -o {{ zbx_keyring }} {{ zbx_key_asc }}"
-    args:
-      creates: "{{ zbx_keyring }}"
-    when: ansible_os_family == "Debian"
-
-  - name: Add Zabbix APT repository
+  - name: Add Zabbix APT repo
     apt_repository:
       repo: >-
-        deb [arch=amd64 signed-by={{ zbx_keyring }}]
-        https://repo.zabbix.com/zabbix/{{ zabbix_version }}/ubuntu
-        {{ zbx_ubuntu_series }} main
-      filename: zabbix
+        deb https://repo.zabbix.com/zabbix/{{ zabbix_version }}/ubuntu
+        {{ ansible_lsb.codename }} main
       state: present
       update_cache: true
-    when: ansible_os_family == "Debian"
 
-  # ──────────────────────────────────────────────────────────
-  # 3  OS-specific vars & package install
-  # ──────────────────────────────────────────────────────────
-  - name: OS-specific variables
-    set_fact:
-      zbx_frontend_pkg: "{{ 'zabbix-web-mysql' if ansible_os_family == 'RedHat'
-                                            else 'zabbix-frontend-php' }}"
-      zbx_web_srv:      "{{ 'httpd' if ansible_os_family == 'RedHat'
-                                     else 'apache2' }}"
-      zbx_apache_conf:  "{{ '/etc/httpd/conf.d/zabbix.conf'
-                            if ansible_os_family == 'RedHat'
-                            else '/etc/apache2/conf-available/zabbix.conf' }}"
-      mysql_socket:     "{{ '/var/lib/mysql/mysql.sock'
-                            if ansible_os_family == 'RedHat'
-                            else '/var/run/mysqld/mysqld.sock' }}"
-
-  - name: Install Zabbix server, agent & MariaDB
-    package:
+  # ------------------------------------------------------------------
+  # 2 — Install server, agent, database & web stack
+  # ------------------------------------------------------------------
+  - name: Install Zabbix server, agent, MariaDB, Apache & PHP deps
+    apt:
       name:
         - zabbix-server-mysql
-        - "{{ zbx_frontend_pkg }}"
+        - zabbix-frontend-php
         - zabbix-agent
         - mariadb-server
-        - "{{ 'python3-PyMySQL' if ansible_os_family == 'RedHat'
-                                else 'python3-pymysql' }}"
+        - php-mysql
+        - libapache2-mod-php
       state: present
       update_cache: true
 
-  # ──────────────────────────────────────────────────────────
-  # 4  MariaDB initialisation
-  # ──────────────────────────────────────────────────────────
-  - name: Ensure MariaDB running & enabled
+  # ------------------------------------------------------------------
+  # 3 — Create database & user (socket login as root)
+  # ------------------------------------------------------------------
+  - name: Ensure MariaDB running
     service:
       name: mariadb
       state: started
       enabled: true
 
-  - name: Wait for socket
-    wait_for:
-      path: "{{ mysql_socket }}"
-      state: started
-      timeout: 30
-
-  - name: Create DB & user (idempotent)
+  - name: Create DB and user
     shell: |
-      {{ mysql_cli }} <<'SQL'
+      mysql --protocol=socket <<'EOSQL'
       CREATE DATABASE IF NOT EXISTS {{ zabbix_db_name }}
         CHARACTER SET utf8 COLLATE utf8_bin;
       CREATE USER IF NOT EXISTS '{{ zabbix_db_user }}'@'localhost'
-        IDENTIFIED WITH mysql_native_password BY '{{ zabbix_db_pass }}';
+        IDENTIFIED BY '{{ zabbix_db_pass }}';
       GRANT ALL PRIVILEGES ON {{ zabbix_db_name }}.* TO
         '{{ zabbix_db_user }}'@'localhost';
       FLUSH PRIVILEGES;
-      SQL
+      EOSQL
     args:
       executable: /bin/bash
 
-  # ──────────────────────────────────────────────────────────
-  # 5  Import Zabbix schema once
-  # ──────────────────────────────────────────────────────────
-  - name: Schema file present?
+  # ------------------------------------------------------------------
+  # 4 — Import the initial schema (one-time)
+  # ------------------------------------------------------------------
+  - name: Check if schema already imported
     stat:
       path: "/var/lib/mysql/{{ zabbix_db_name }}/history.ibd"
-    register: schema_present
+    register: schema_file
 
-  - name: Import schema / images / data
+  - name: Import Zabbix schema, images & data
     shell: |
-      for f in schema.sql.gz images.sql.gz data.sql.gz; do
-        gzip -dc /usr/share/zabbix-server-mysql/$f | {{ mysql_cli }} {{ zabbix_db_name }}
-      done
-    when: not schema_present.stat.exists
+      zcat /usr/share/zabbix-server-mysql/schema.sql.gz  | mysql {{ zabbix_db_name }}
+      zcat /usr/share/zabbix-server-mysql/images.sql.gz  | mysql {{ zabbix_db_name }}
+      zcat /usr/share/zabbix-server-mysql/data.sql.gz    | mysql {{ zabbix_db_name }}
+    when: not schema_file.stat.exists
     args:
       executable: /bin/bash
-      creates: "/var/lib/mysql/{{ zabbix_db_name }}/history.ibd"
 
-  # ──────────────────────────────────────────────────────────
-  # 6  Verify ≥100 tables via PyMySQL
-  # ──────────────────────────────────────────────────────────
-  - name: Count tables
-    community.mysql.mysql_query:
-      login_user: "{{ zabbix_db_user }}"
-      login_password: "{{ zabbix_db_pass }}"
-      login_host: 127.0.0.1
-      login_db: "{{ zabbix_db_name }}"
-      query: "SELECT COUNT(*) AS cnt FROM information_schema.tables WHERE table_schema='{{ zabbix_db_name }}';"
-    register: tbl_cnt
-
-  - name: Fail if schema missing
-    fail:
-      msg: "Schema import failed — only {{ tbl_cnt.query_result[0]['cnt'] }} tables found."
-    when: tbl_cnt.query_result[0]['cnt'] | int < 100
-
-  # ──────────────────────────────────────────────────────────
-  # 7  zabbix_server.conf
-  # ──────────────────────────────────────────────────────────
-  - name: Configure zabbix_server.conf
+  # ------------------------------------------------------------------
+  # 5 — Tweak zabbix_server.conf so it can log in
+  # ------------------------------------------------------------------
+  - name: Configure /etc/zabbix/zabbix_server.conf
     blockinfile:
       path: /etc/zabbix/zabbix_server.conf
-      marker: "# {mark} ANSIBLE MANAGED DB BLOCK"
+      marker: "# {mark} ANSIBLE MANAGED BLOCK"
       block: |
         DBHost=127.0.0.1
-        DBPort=3306
-        DBName={{ zabbix_db_name }}
-        DBUser={{ zabbix_db_user }}
         DBPassword={{ zabbix_db_pass }}
+        DBUser={{ zabbix_db_user }}
+        DBName={{ zabbix_db_name }}
     notify: restart zabbix-server
 
-  # ──────────────────────────────────────────────────────────
-  # 8  PHP front-end timezone
-  # ──────────────────────────────────────────────────────────
-  - name: Ensure PHP timezone in Apache conf
+  # ------------------------------------------------------------------
+  # 6 — Set PHP timezone for the web UI
+  # ------------------------------------------------------------------
+  - name: Ensure PHP timezone is set
     lineinfile:
-      path: "{{ zbx_apache_conf }}"
-      regexp: '^php_value +date.timezone'
-      line: "php_value date.timezone {{ php_timezone }}"
-    notify: restart webserver
-    when: stat(path=zbx_apache_conf).stat.exists
+      path: /etc/zabbix/apache.conf
+      regexp: '^php_value date.timezone'
+      line:  "php_value date.timezone {{ php_timezone }}"
+    notify: restart apache2
 
-  - name: Enable Apache Zabbix conf (Debian/Ubuntu)
+  # ------------------------------------------------------------------
+  # 7 — Enable Apache site & start all services
+  # ------------------------------------------------------------------
+  - name: Enable Zabbix Apache config
     command: a2enconf zabbix
-    when:
-      - ansible_os_family == 'Debian'
-      - stat(path=zbx_apache_conf).stat.exists
-    notify: restart webserver
+    notify: restart apache2
+    args:
+      creates: /etc/apache2/conf-enabled/zabbix.conf
 
-  # ──────────────────────────────────────────────────────────
-  # 9  Start & enable services
-  # ──────────────────────────────────────────────────────────
-  - name: Ensure web server is running
-    service:
-      name: "{{ zbx_web_srv }}"
-      state: started
-      enabled: true
-
-  - name: Restart & enable Zabbix services
+  - name: Start & enable core services
     service:
       name: "{{ item }}"
-      state: restarted
+      state: started
       enabled: true
     loop:
       - zabbix-server
       - zabbix-agent
+      - apache2
 
-  # ──────────────────────────────────────────────────────────
-  # 10  Handlers
-  # ──────────────────────────────────────────────────────────
+  # ------------------------------------------------------------------
+  # 8 — Handlers
+  # ------------------------------------------------------------------
   handlers:
     - name: restart zabbix-server
       service:
         name: zabbix-server
         state: restarted
 
-    - name: restart webserver
+    - name: restart apache2
       service:
-        name: "{{ zbx_web_srv }}"
+        name: apache2
         state: restarted
