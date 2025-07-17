@@ -5,55 +5,61 @@
   gather_facts: true
 
   vars:
+    # —— Versions & credentials ————————————————————
     zabbix_version: "5.0"
 
-    # —— Zabbix DB credentials ————————————————
     zabbix_db_name: zabbix
     zabbix_db_user: zabbix
-    zabbix_db_pass: zabbix_password   # change / vault in production
+    zabbix_db_pass: zabbix_password   # ← change / vault in prod
 
     php_timezone: Africa/Casablanca
 
+    zbx_key_path:  /usr/share/keyrings/zabbix.gpg
+    zbx_repo: >-
+      deb [arch=amd64 signed-by={{ zbx_key_path }}]
+      https://repo.zabbix.com/zabbix/{{ zabbix_version }}/ubuntu
+      {{ ansible_lsb.codename }} main
+
   tasks:
   # ------------------------------------------------------------------
-  # 1 — Add the official Zabbix repo & key (Ubuntu / Debian)
+  # 1 — Repo key & repository
   # ------------------------------------------------------------------
-  - name: Install gnupg & lsb-release
+  - name: Install repo prerequisites
     apt:
-      name: [gnupg, lsb-release]
+      name: [gnupg, ca-certificates, lsb-release, curl]
       state: present
       update_cache: true
 
-  - name: Add Zabbix signing key
-    apt_key:
+  - name: Download Zabbix GPG key
+    get_url:
       url: https://repo.zabbix.com/zabbix-official-repo.key
-      state: present
+      dest: "{{ zbx_key_path }}"
+      mode: "0644"
 
-  - name: Add Zabbix APT repo
+  - name: Add Zabbix APT repository
     apt_repository:
-      repo: >-
-        deb https://repo.zabbix.com/zabbix/{{ zabbix_version }}/ubuntu
-        {{ ansible_lsb.codename }} main
+      repo: "{{ zbx_repo }}"
+      filename: zabbix
       state: present
       update_cache: true
 
   # ------------------------------------------------------------------
-  # 2 — Install server, agent, database & web stack
+  # 2 — Install packages
   # ------------------------------------------------------------------
-  - name: Install Zabbix server, agent, MariaDB, Apache & PHP deps
+  - name: Install Zabbix server, agent, DB, web stack
     apt:
       name:
         - zabbix-server-mysql
         - zabbix-frontend-php
         - zabbix-agent
         - mariadb-server
-        - php-mysql
         - libapache2-mod-php
+        - php-mysql
       state: present
       update_cache: true
 
   # ------------------------------------------------------------------
-  # 3 — Create database & user (socket login as root)
+  # 3 — Database: create & grant (socket login as root)
   # ------------------------------------------------------------------
   - name: Ensure MariaDB running
     service:
@@ -76,56 +82,56 @@
       executable: /bin/bash
 
   # ------------------------------------------------------------------
-  # 4 — Import the initial schema (one-time)
+  # 4 — Import initial schema (only once)
   # ------------------------------------------------------------------
   - name: Check if schema already imported
     stat:
       path: "/var/lib/mysql/{{ zabbix_db_name }}/history.ibd"
-    register: schema_file
+    register: schema_present
 
-  - name: Import Zabbix schema, images & data
+  - name: Import schema / images / data
     shell: |
-      zcat /usr/share/zabbix-server-mysql/schema.sql.gz  | mysql {{ zabbix_db_name }}
-      zcat /usr/share/zabbix-server-mysql/images.sql.gz  | mysql {{ zabbix_db_name }}
-      zcat /usr/share/zabbix-server-mysql/data.sql.gz    | mysql {{ zabbix_db_name }}
-    when: not schema_file.stat.exists
+      for f in schema.sql.gz images.sql.gz data.sql.gz; do
+        zcat /usr/share/zabbix-server-mysql/$f | mysql {{ zabbix_db_name }}
+      done
+    when: not schema_present.stat.exists
     args:
       executable: /bin/bash
 
   # ------------------------------------------------------------------
-  # 5 — Tweak zabbix_server.conf so it can log in
+  # 5 — Configure zabbix_server.conf
   # ------------------------------------------------------------------
-  - name: Configure /etc/zabbix/zabbix_server.conf
+  - name: Write DB settings into zabbix_server.conf
     blockinfile:
       path: /etc/zabbix/zabbix_server.conf
-      marker: "# {mark} ANSIBLE MANAGED BLOCK"
+      marker: "# {mark} ANSIBLE MANAGED DB BLOCK"
       block: |
         DBHost=127.0.0.1
-        DBPassword={{ zabbix_db_pass }}
         DBUser={{ zabbix_db_user }}
+        DBPassword={{ zabbix_db_pass }}
         DBName={{ zabbix_db_name }}
     notify: restart zabbix-server
 
   # ------------------------------------------------------------------
-  # 6 — Set PHP timezone for the web UI
+  # 6 — Set PHP timezone
   # ------------------------------------------------------------------
-  - name: Ensure PHP timezone is set
+  - name: Ensure PHP timezone in /etc/zabbix/apache.conf
     lineinfile:
       path: /etc/zabbix/apache.conf
       regexp: '^php_value date.timezone'
       line:  "php_value date.timezone {{ php_timezone }}"
     notify: restart apache2
 
-  # ------------------------------------------------------------------
-  # 7 — Enable Apache site & start all services
-  # ------------------------------------------------------------------
   - name: Enable Zabbix Apache config
     command: a2enconf zabbix
-    notify: restart apache2
     args:
       creates: /etc/apache2/conf-enabled/zabbix.conf
+    notify: restart apache2
 
-  - name: Start & enable core services
+  # ------------------------------------------------------------------
+  # 7 — Enable & start services
+  # ------------------------------------------------------------------
+  - name: Enable and start core services
     service:
       name: "{{ item }}"
       state: started
