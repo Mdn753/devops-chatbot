@@ -5,28 +5,58 @@
   gather_facts: true
 
   collections:
-    - community.mysql          # only used _after_ zabbix user exists
+    - community.mysql
 
   vars:
-    # ── Versions & credentials ────────────────────────────────
+    # ── Versions & Credentials ────────────────────────────────
     zabbix_version: "5.0"
 
     zabbix_db_name: zabbix
     zabbix_db_user: zabbix
-    zabbix_db_pass: zabbix_password      # ← vault/override in prod
+    zabbix_db_pass: zabbix_password        # ← vault / override in prod
+
+    # Optional fallback when /etc/mysql/debian.cnf is NOT present
+    mysql_root_user: root
+    mysql_root_password: ""                # set if root has a password
 
     php_timezone: Africa/Casablanca
 
-    # Debian/Ubuntu repo-key paths
+    # Debian/Ubuntu key paths
     zbx_key_url:  https://repo.zabbix.com/zabbix-official-repo.key
     zbx_key_asc:  /usr/share/keyrings/zabbix.asc
     zbx_keyring: /usr/share/keyrings/zabbix.gpg
 
   tasks:
   # ───────────────────────────────────────────────────────────
-  # Repositories  (unchanged from earlier versions)
+  # Locate an admin account for MariaDB
   # ───────────────────────────────────────────────────────────
-  - name: Add Zabbix repo for RHEL
+  - name: Check for debian-sys-maint credentials
+    ansible.builtin.stat:
+      path: /etc/mysql/debian.cnf
+    register: debian_cnf
+
+  - name: Read debian-sys-maint password
+    ansible.builtin.command:
+      cmd: >
+        awk '/^password/ {print $3; exit}' /etc/mysql/debian.cnf
+    register: debian_pass
+    when: debian_cnf.stat.exists
+    changed_when: false
+
+  - name: Set admin connection facts
+    ansible.builtin.set_fact:
+      admin_user: "{{ 'debian-sys-maint' if debian_cnf.stat.exists
+                                       else mysql_root_user }}"
+      admin_pass: "{{ debian_pass.stdout
+                     if debian_cnf.stat.exists
+                     else mysql_root_password }}"
+      admin_defaults_file: "{{ '/etc/mysql/debian.cnf'
+                               if debian_cnf.stat.exists else '' }}"
+
+  # ───────────────────────────────────────────────────────────
+  # Repositories & keys  (unchanged logic)
+  # ───────────────────────────────────────────────────────────
+  - name: Add Zabbix repo (RHEL)
     ansible.builtin.yum:
       name: >-
         https://repo.zabbix.com/zabbix/{{ zabbix_version }}/rhel/
@@ -51,7 +81,7 @@
   - name: Map Ubuntu codename → Zabbix series
     ansible.builtin.set_fact:
       zbx_ubuntu_series: "{{ {'jammy':'jammy','focal':'focal','bionic':'bionic'}
-                             .get(ansible_distribution_release,'jammy') }}"
+                            .get(ansible_distribution_release,'jammy') }}"
     when: ansible_os_family == "Debian"
 
   - name: Download Zabbix ASCII key
@@ -80,7 +110,7 @@
     when: ansible_os_family == "Debian"
 
   # ───────────────────────────────────────────────────────────
-  # Distro-specific paths & package names
+  # OS-specific paths & package names
   # ───────────────────────────────────────────────────────────
   - name: Set distro-specific variables
     ansible.builtin.set_fact:
@@ -111,7 +141,7 @@
       update_cache: true
 
   # ───────────────────────────────────────────────────────────
-  # MariaDB initialisation  (via CLI – no PyMySQL yet)
+  # MariaDB initialisation
   # ───────────────────────────────────────────────────────────
   - name: Ensure MariaDB running & enabled
     ansible.builtin.service:
@@ -125,9 +155,14 @@
       state: started
       timeout: 30
 
-  - name: Create DB & user (idempotent SQL block)
+  # -- create DB & user --------------------------------------------------------
+  - name: Create DB & user (idempotent)
     ansible.builtin.shell: |
-      mysql --protocol=socket -uroot <<'SQL'
+      {% if admin_defaults_file %}
+      mysql --defaults-file={{ admin_defaults_file }} <<'SQL'
+      {% else %}
+      mysql -u{{ admin_user }} {% if admin_pass|length > 0 %}-p{{ admin_pass }}{% endif %} <<'SQL'
+      {% endif %}
       CREATE DATABASE IF NOT EXISTS {{ zabbix_db_name }}
         CHARACTER SET utf8 COLLATE utf8_bin;
       CREATE USER IF NOT EXISTS '{{ zabbix_db_user }}'@'localhost'
@@ -139,39 +174,42 @@
     args:
       executable: /bin/bash
 
-  # ───────────────────────────────────────────────────────────
-  # Import Zabbix schema once
-  # ───────────────────────────────────────────────────────────
+  # -- import schema once ------------------------------------------------------
   - name: Check if schema already loaded
-    stat:
+    ansible.builtin.stat:
       path: "/var/lib/mysql/{{ zabbix_db_name }}/history.ibd"
     register: schema_present
 
   - name: Import schema / images / data
-    shell: |
+    ansible.builtin.shell: |
+      {% set mysql_cli = ("mysql --defaults-file=" + admin_defaults_file)
+                          if admin_defaults_file else
+                          ("mysql -u" + admin_user ~
+                           ((" -p" + admin_pass) if admin_pass|length > 0 else "")) %}
       for f in schema.sql.gz images.sql.gz data.sql.gz; do
         gzip -dc "/usr/share/zabbix-server-mysql/$f" | \
-          mysql --protocol=socket -uroot {{ zabbix_db_name }}
+          {{ mysql_cli }} {{ zabbix_db_name }}
       done
     when: not schema_present.stat.exists
     args:
       executable: /bin/bash
       creates: "/var/lib/mysql/{{ zabbix_db_name }}/history.ibd"
 
-  # ───────────────────────────────────────────────────────────
-  # Verify schema (now we can use PyMySQL with the zabbix user)
-  # ───────────────────────────────────────────────────────────
-  - name: Count tables
+  # -- verify schema -----------------------------------------------------------
+  - name: Verify table count ≥ 100
     community.mysql.mysql_query:
       login_user: "{{ zabbix_db_user }}"
       login_password: "{{ zabbix_db_pass }}"
       login_host: 127.0.0.1
       login_db: "{{ zabbix_db_name }}"
-      query: "SELECT COUNT(*) AS cnt FROM information_schema.tables WHERE table_schema='{{ zabbix_db_name }}';"
+      query: |
+        SELECT COUNT(*) AS cnt
+        FROM information_schema.tables
+        WHERE table_schema='{{ zabbix_db_name }}';
     register: tbl_cnt
 
   - name: Fail if schema missing
-    fail:
+    ansible.builtin.fail:
       msg: "Schema import failed — only {{ tbl_cnt.query_result[0]['cnt'] }} tables found."
     when: tbl_cnt.query_result[0]['cnt'] | int < 100
 
@@ -179,7 +217,7 @@
   # Zabbix server configuration
   # ───────────────────────────────────────────────────────────
   - name: Configure /etc/zabbix/zabbix_server.conf
-    blockinfile:
+    ansible.builtin.blockinfile:
       path: /etc/zabbix/zabbix_server.conf
       marker: "# {mark} ANSIBLE MANAGED DB BLOCK"
       block: |
@@ -191,34 +229,34 @@
     notify: restart zabbix-server
 
   # ───────────────────────────────────────────────────────────
-  # PHP front-end timezone
+  # PHP front-end timezone tweak
   # ───────────────────────────────────────────────────────────
   - name: Ensure PHP timezone in Apache conf
-    lineinfile:
+    ansible.builtin.lineinfile:
       path: "{{ zbx_apache_conf }}"
       regexp: '^php_value +date.timezone'
       line:  "php_value date.timezone {{ php_timezone }}"
-    when: stat(path=zbx_apache_conf).stat.exists
     notify: restart webserver
+    when: ansible.builtin.stat(path=zbx_apache_conf).stat.exists
 
   - name: Enable Apache Zabbix conf (Debian/Ubuntu)
-    command: a2enconf zabbix
+    ansible.builtin.command: a2enconf zabbix
     when:
       - ansible_os_family == 'Debian'
-      - stat(path=zbx_apache_conf).stat.exists
+      - ansible.builtin.stat(path=zbx_apache_conf).stat.exists
     notify: restart webserver
 
   # ───────────────────────────────────────────────────────────
   # Enable & start services
   # ───────────────────────────────────────────────────────────
   - name: Ensure web server is running
-    service:
+    ansible.builtin.service:
       name: "{{ zbx_web_srv }}"
       state: started
       enabled: true
 
   - name: Restart & enable Zabbix services
-    service:
+    ansible.builtin.service:
       name: "{{ item }}"
       state: restarted
       enabled: true
@@ -231,11 +269,11 @@
   # ───────────────────────────────────────────────────────────
   handlers:
     - name: restart zabbix-server
-      service:
+      ansible.builtin.service:
         name: zabbix-server
         state: restarted
 
     - name: restart webserver
-      service:
+      ansible.builtin.service:
         name: "{{ zbx_web_srv }}"
         state: restarted
