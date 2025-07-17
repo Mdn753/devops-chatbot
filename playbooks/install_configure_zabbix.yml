@@ -175,23 +175,61 @@
       path: "/var/lib/mysql/{{ zabbix_db_name }}/history.ibd"
     register: schema_check
 
-  - name: Find Zabbix schema file
+  - name: Find Zabbix schema directories
     ansible.builtin.find:
-      paths: 
-        - /usr/share/doc/zabbix-server-mysql*
-        - /usr/share/zabbix-server-mysql
+      paths: /usr/share/doc
+      patterns: "zabbix-server-mysql*"
+      file_type: directory
+    register: schema_dirs
+    when: not schema_check.stat.exists
+
+  - name: Find Zabbix schema file in discovered directories
+    ansible.builtin.find:
+      paths: "{{ item.path }}"
       patterns: "create.sql.gz"
       recurse: true
-    register: schema_file
-    when: not schema_check.stat.exists
+    register: schema_files
+    loop: "{{ schema_dirs.files }}"
+    when: 
+      - not schema_check.stat.exists
+      - schema_dirs.files is defined
+      - schema_dirs.files | length > 0
+
+  - name: Set schema file path
+    ansible.builtin.set_fact:
+      schema_file_path: "{{ item.files[0].path }}"
+    loop: "{{ schema_files.results }}"
+    when: 
+      - not schema_check.stat.exists
+      - item.files is defined
+      - item.files | length > 0
+    loop_control:
+      loop_var: item
+
+  - name: Alternative schema file search (fallback)
+    ansible.builtin.shell: |
+      find /usr/share -name "create.sql.gz" -path "*/zabbix-server-mysql*" 2>/dev/null | head -1
+    register: schema_fallback
+    when: 
+      - not schema_check.stat.exists
+      - schema_file_path is not defined
+
+  - name: Set fallback schema file path
+    ansible.builtin.set_fact:
+      schema_file_path: "{{ schema_fallback.stdout }}"
+    when: 
+      - not schema_check.stat.exists
+      - schema_file_path is not defined
+      - schema_fallback.stdout != ""
 
   - name: Import initial Zabbix schema (only if not exists)
     ansible.builtin.shell: |
-      gzip -dc "{{ schema_file.files[0].path }}" | \
+      gzip -dc "{{ schema_file_path }}" | \
       mysql --socket={{ mysql_socket }} -u root {{ '-p' + zabbix_db_pass if mysql_root_check is failed else '' }} {{ zabbix_db_name }}
     when: 
       - not schema_check.stat.exists
-      - schema_file.files | length > 0
+      - schema_file_path is defined
+      - schema_file_path != ""
     register: schema_import
     failed_when: schema_import.rc != 0
 
@@ -206,8 +244,10 @@
 
   - name: Fail if schema not properly imported
     ansible.builtin.fail:
-      msg: "Zabbix database schema was not imported correctly"
-    when: schema_verify.rowcount[0] == 0
+      msg: "Zabbix database schema was not imported correctly. Schema file path: {{ schema_file_path | default('NOT FOUND') }}"
+    when: 
+      - schema_verify.rowcount[0] == 0
+      - not schema_check.stat.exists
 
   # ───────────────────────────────────────────────────────────
   # Zabbix server configuration  (TCP on localhost)
