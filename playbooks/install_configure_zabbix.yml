@@ -1,63 +1,93 @@
 ---
-- name: Zabbix 5 LTS • Server + Web + Agent on every VM
-  hosts: all            # AWX inventory “vms” supplies the real hosts
+- name: Zabbix 5 LTS — server • web • agent  (all-in-one VM)
+  hosts: all          # your AWX inventory “vms”
   become: true
   gather_facts: true
 
   vars:
-    # ─────────── survey-friendly secrets ────────────
-    zabbix_version:           "5.0"
+    # ─── tweak these via an AWX Survey ─────────────────────────
+    zabbix_version:        "5.0"
 
-    mysql_root_password:      "root_pw"          # SINGLE definition
-    zabbix_db_password:       "StrongDBpass!"
-    zabbix_admin_password:    "zabbix"
-    php_timezone:             "Africa/Casablanca"
+    mysql_root_password:   "root_pw"          # ONE definition only
+    zabbix_db_password:    "StrongDBpass!"
+    zabbix_admin_password: "zabbix"
+    php_timezone:          "Africa/Casablanca"
 
-    # ─────────── database object names ──────────────
-    zabbix_db_name:           zabbix
-    zabbix_db_user:           zabbix
+    # ─── DB names/users the dj-wasabi roles expect ────────────
+    zabbix_db_name:  zabbix
+    zabbix_db_user:  zabbix
 
-    # ─────────── geerlingguy.mysql role tweaks ──────
-    mysql_flavor:             mariadb
-    mysql_packages:           ['mariadb-server']
-    mysql_daemon:             mariadb
-    mysql_skip_configure:     true        # ← skip my.cnf block that crashes
-    mysql_copy_mycnf:         false
-    mysql_root_username:      root
-    mysql_root_password:      "{{ mysql_root_password }}"
+    # ─── dj-wasabi.zabbix-server role vars ───────────────────
+    zabbix_server_version:         "{{ zabbix_version }}"
+    zabbix_server_database_long:   mysql
+    zabbix_server_dbname:          "{{ zabbix_db_name }}"
+    zabbix_server_dbuser:          "{{ zabbix_db_user }}"
+    zabbix_server_dbpassword:      "{{ zabbix_db_password }}"
+    zabbix_database_sqlload:       true        # role loads schema
+    zabbix_api_create_user:        true
+    zabbix_api_login_user:         Admin
+    zabbix_api_login_pass:         "{{ zabbix_admin_password }}"
 
-    mysql_databases:
-      - name: "{{ zabbix_db_name }}"
-        encoding: utf8
-        collation: utf8_bin
-    mysql_users:
-      - name: "{{ zabbix_db_user }}"
-        host: localhost
-        password: "{{ zabbix_db_password }}"
-        priv: "{{ zabbix_db_name }}.*:ALL"
+    # ─── dj-wasabi.zabbix-web role vars ──────────────────────
+    zabbix_web_version:            "{{ zabbix_version }}"
+    zabbix_web_timezone:           "{{ php_timezone }}"
+    zabbix_web_language:           en_US
 
-    # ─────────── dj-wasabi.zabbix-server vars ───────
-    zabbix_server_version:        "{{ zabbix_version }}"
-    zabbix_server_database_long:  mysql
-    zabbix_server_dbname:         "{{ zabbix_db_name }}"
-    zabbix_server_dbuser:         "{{ zabbix_db_user }}"
-    zabbix_server_dbpassword:     "{{ zabbix_db_password }}"
-    zabbix_database_sqlload:      true
-    zabbix_api_create_user:       true
-    zabbix_api_login_user:        Admin
-    zabbix_api_login_pass:        "{{ zabbix_admin_password }}"
+    # ─── local agent talks to the same VM ────────────────────
+    zabbix_agent_server:           127.0.0.1
+    zabbix_agent_serveractive:     127.0.0.1
 
-    # ─────────── dj-wasabi.zabbix-web vars ──────────
-    zabbix_web_version:           "{{ zabbix_version }}"
-    zabbix_web_timezone:          "{{ php_timezone }}"
-    zabbix_web_language:          en_US
+  pre_tasks:
+    # 1️⃣  Ensure MariaDB server & basic PHP stack are present ——­
+    - name: Install MariaDB + minimal web stack (Ubuntu / Debian)
+      apt:
+        name:
+          - mariadb-server
+          - libapache2-mod-php
+          - php-mysql
+        state: present
+        update_cache: true
+      when: ansible_os_family == "Debian"
 
-    # ─────────── dj-wasabi.zabbix-agent vars ────────
-    zabbix_agent_server:          127.0.0.1
-    zabbix_agent_serveractive:    127.0.0.1
+    - name: Install MariaDB + minimal web stack (RHEL family)
+      yum:
+        name:
+          - mariadb-server
+          - httpd
+          - php
+          - php-mysqlnd
+        state: present
+      when: ansible_os_family == "RedHat"
+
+    - name: Ensure MariaDB running
+      service:
+        name: mariadb
+        state: started
+        enabled: true
+
+    # 2️⃣  Create Zabbix DB & user via root socket login ————
+    - name: Create DB & user if missing
+      shell: |
+        mysql --protocol=socket -uroot <<'EOSQL'
+        CREATE DATABASE IF NOT EXISTS {{ zabbix_db_name }}
+          CHARACTER SET utf8 COLLATE utf8_bin;
+        CREATE USER IF NOT EXISTS '{{ zabbix_db_user }}'@'localhost'
+          IDENTIFIED BY '{{ zabbix_db_password }}';
+        GRANT ALL PRIVILEGES ON {{ zabbix_db_name }}.* TO
+          '{{ zabbix_db_user }}'@'localhost';
+        FLUSH PRIVILEGES;
+        EOSQL
+      args:
+        executable: /bin/bash
 
   roles:
-    - geerlingguy.mysql
-    - dj-wasabi.zabbix-server
-    - dj-wasabi.zabbix-web
-    - dj-wasabi.zabbix-agent
+    - dj-wasabi.zabbix-server   # loads schema, configures server
+    - dj-wasabi.zabbix-web      # front-end, sets PHP TZ
+    - dj-wasabi.zabbix-agent    # local agent
+
+  post_tasks:
+    - name: Show URL & default login
+      debug:
+        msg: >
+          Zabbix UI is ready at http://{{ ansible_default_ipv4.address }}/zabbix
+          → Login: Admin / {{ zabbix_admin_password }}
