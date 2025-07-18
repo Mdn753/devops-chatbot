@@ -1,30 +1,30 @@
 ---
+# file: install_configure_zabbix.yml
 - name: Zabbix 5 LTS — server • web • agent (all-in-one VM)
-  hosts: all              # inventory “vms”
+  hosts: all                       # AWX inventory “vms”
   become: true
   gather_facts: true
 
   vars:
-    # ─── secrets you may expose via an AWX Survey ──────────────
-    zabbix_version:        "5.0"
+    # ─────── override these via an AWX Survey if you like ───────
+    zabbix_version:         "5.0"
 
-    mysql_root_password:   "root_pw"
-    zabbix_db_password:    "StrongDBpass!"
-    zabbix_admin_password: "zabbix"
-    php_timezone:          "Africa/Casablanca"
+    mysql_root_password:    "root_pw"
+    zabbix_db_password:     "StrongDBpass!"
+    zabbix_admin_password:  "zabbix"
+    php_timezone:           "Africa/Casablanca"
 
-    zabbix_db_name:  zabbix
-    zabbix_db_user:  zabbix
+    zabbix_db_name:         zabbix
+    zabbix_db_user:         zabbix
 
-    # ─── GPG-key map — key **50** must be an integer, not a string
+    # ─────── GPG-key map that works for every lookup path ───────
     zabbix_repo_gpg_key:
-      50: 082AB56BA14FE591     # ← NO quotes around 50
+      "50": 082AB56BA14FE591    # string key  ← needed by first lookup
+      50:   082AB56BA14FE591    # integer key ← needed by second lookup
 
   pre_tasks:
-    # ------------------------------------------------------------------
-    # 0️⃣  Minimal packages (Debian / Ubuntu).  Add a yum block for RHEL
-    # ------------------------------------------------------------------
-    - name: Install MariaDB + minimal PHP stack
+    # 0️⃣  Minimal packages (Debian / Ubuntu).  Add yum block for RHEL if needed
+    - name: Install MariaDB and PHP stack (Debian & Ubuntu)
       apt:
         name:
           - mariadb-server
@@ -34,15 +34,13 @@
         update_cache: true
       when: ansible_os_family == 'Debian'
 
-    # ------------------------------------------------------------------
-    # 1️⃣  Fix datadir ownership cleanly
-    # ------------------------------------------------------------------
-    - name: Stop MariaDB
+    # 1️⃣  Fix datadir perms cleanly
+    - name: Stop MariaDB before fixing /var/lib/mysql ownership
       service:
         name: mariadb
         state: stopped
 
-    - name: Ensure /var/lib/mysql owned by mysql:mysql
+    - name: Ensure /var/lib/mysql owned by mysql:mysql (mode 0755)
       file:
         path: /var/lib/mysql
         owner: mysql
@@ -55,10 +53,8 @@
         state: started
         enabled: true
 
-    # ------------------------------------------------------------------
-    # 2️⃣  Create database and user (idempotent)
-    # ------------------------------------------------------------------
-    - name: Create zabbix database and user
+    # 2️⃣  Create Zabbix DB & user (idempotent via root socket login)
+    - name: Create Zabbix database and user
       shell: |
         mysql --protocol=socket -uroot <<'EOSQL'
         CREATE DATABASE IF NOT EXISTS {{ zabbix_db_name }}
@@ -97,7 +93,7 @@
         zabbix_agent_serveractive:    127.0.0.1
 
   post_tasks:
-    - name: Show Zabbix URL & credentials
+    - name: Show Zabbix URL & default login
       debug:
         msg: >
           Zabbix UI → http://{{ ansible_default_ipv4.address }}/zabbix
