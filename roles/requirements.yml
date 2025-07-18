@@ -1,0 +1,6 @@
+# Galaxy roles that the playbook needs
+roles:
+  - name: geerlingguy.mysql
+  - name: dj-wasabi.zabbix-server
+  - name: dj-wasabi.zabbix-web
+  - name: dj-wasabi.zabbix-agent
