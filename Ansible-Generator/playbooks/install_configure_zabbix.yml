@@ -1,29 +1,27 @@
 ---
 - name: Zabbix 5 LTS — server • web • agent (all-in-one VM)
-  hosts: all                      # AWX inventory “vms”
+  hosts: all            # AWX inventory “vms”
   become: true
   gather_facts: true
 
   vars:
-    # ── survey-friendly secrets ────────────────────────────────
-    zabbix_version:         "5.0"
+    # ── secrets you’ll override via an AWX Survey ────────────────
+    zabbix_version:        "5.0"
 
-    mysql_root_password:    "root_pw"
-    zabbix_db_password:     "StrongDBpass!"
-    zabbix_admin_password:  "zabbix"
-    php_timezone:           "Africa/Casablanca"
+    mysql_root_password:   "root_pw"
+    zabbix_db_password:    "StrongDBpass!"
+    zabbix_admin_password: "zabbix"
+    php_timezone:          "Africa/Casablanca"
 
-    # ── DB object names ────────────────────────────────────────
     zabbix_db_name:  zabbix
     zabbix_db_user:  zabbix
 
-    # ── GPG key map required by dj-wasabi role (index “50”) ────
+    # ── REQUIRED: GPG key map with *string* index "50" ───────────
     zabbix_repo_gpg_key:
-      "50": "082AB56BA14FE591"
+      '50': '082AB56BA14FE591'      # ← quoted ‟50” fixes the lookup error
 
   pre_tasks:
-    # 0️⃣  install core packages (Debian example; add yum block for RHEL)
-    - name: Install MariaDB + minimal PHP stack
+    - name: Install MariaDB + minimal PHP stack (Debian/Ubuntu)
       apt:
         name:
           - mariadb-server
@@ -31,21 +29,19 @@
           - php-mysql
         state: present
         update_cache: true
-      when: ansible_os_family == "Debian"
+      when: ansible_os_family == 'Debian'
 
-    # 1️⃣  fix datadir perms, then start MariaDB
     - name: Stop MariaDB before fixing perms
       service:
         name: mariadb
         state: stopped
 
-    - name: Ensure /var/lib/mysql owned by mysql:mysql mode 0755
+    - name: Ensure /var/lib/mysql owned by mysql:mysql
       file:
         path: /var/lib/mysql
         owner: mysql
         group: mysql
-        mode: "0755"
-        recurse: false
+        mode: '0755'
 
     - name: Start & enable MariaDB
       service:
@@ -53,8 +49,7 @@
         state: started
         enabled: true
 
-    # 2️⃣  create DB + user (idempotent)
-    - name: Create zabbix database and user
+    - name: Create Zabbix database and user (idempotent)
       shell: |
         mysql --protocol=socket -uroot <<'EOSQL'
         CREATE DATABASE IF NOT EXISTS {{ zabbix_db_name }}
@@ -69,32 +64,32 @@
         executable: /bin/bash
 
   roles:
-    - role: dj-wasabi.zabbix-server   # loads schema, configures server
+    - role: dj-wasabi.zabbix-server
       vars:
-        zabbix_server_version:         "{{ zabbix_version }}"
-        zabbix_server_database_long:   mysql
-        zabbix_server_dbname:          "{{ zabbix_db_name }}"
-        zabbix_server_dbuser:          "{{ zabbix_db_user }}"
-        zabbix_server_dbpassword:      "{{ zabbix_db_password }}"
-        zabbix_database_sqlload:       true
-        zabbix_api_create_user:        true
-        zabbix_api_login_user:         Admin
-        zabbix_api_login_pass:         "{{ zabbix_admin_password }}"
+        zabbix_server_version:        "{{ zabbix_version }}"
+        zabbix_server_database_long:  mysql
+        zabbix_server_dbname:         "{{ zabbix_db_name }}"
+        zabbix_server_dbuser:         "{{ zabbix_db_user }}"
+        zabbix_server_dbpassword:     "{{ zabbix_db_password }}"
+        zabbix_database_sqlload:      true
+        zabbix_api_create_user:       true
+        zabbix_api_login_user:        Admin
+        zabbix_api_login_pass:        "{{ zabbix_admin_password }}"
 
     - role: dj-wasabi.zabbix-web
       vars:
-        zabbix_web_version:            "{{ zabbix_version }}"
-        zabbix_web_timezone:           "{{ php_timezone }}"
-        zabbix_web_language:           en_US
+        zabbix_web_version:           "{{ zabbix_version }}"
+        zabbix_web_timezone:          "{{ php_timezone }}"
+        zabbix_web_language:          en_US
 
     - role: dj-wasabi.zabbix-agent
       vars:
-        zabbix_agent_server:           127.0.0.1
-        zabbix_agent_serveractive:     127.0.0.1
+        zabbix_agent_server:          127.0.0.1
+        zabbix_agent_serveractive:    127.0.0.1
 
   post_tasks:
-    - name: Zabbix URL & login hint
+    - name: Zabbix URL and login hint
       debug:
         msg: >
-          Zabbix UI ready at http://{{ ansible_default_ipv4.address }}/zabbix
+          Zabbix UI → http://{{ ansible_default_ipv4.address }}/zabbix
           • Login: Admin / {{ zabbix_admin_password }}
