@@ -43,8 +43,8 @@
         zbx_agent_hostname: >-
           {{
             (inventory_hostname
-             | regex_replace('^[^A-Za-z0-9]+', '')     # strip leading junk
-             | regex_replace('[^A-Za-z0-9._-]', '_')   # convert inner junk
+             | regex_replace('^[^A-Za-z0-9]+', '')     
+             | regex_replace('[^A-Za-z0-9._-]', '_')   
             ) or 'localhost'
           }}
 
