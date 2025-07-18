@@ -1,27 +1,25 @@
 ---
 # file: install_configure_zabbix.yml
 - name: Zabbix 5 LTS — server • web • agent (all-in-one VM)
-  hosts: all                       # AWX inventory “vms”
+  hosts: all                       # AWX inventory "vms"
   become: true
   gather_facts: true
-
+  
   vars:
     # ─────── override these via an AWX Survey if you like ───────
     zabbix_version:         "5.0"
-
     mysql_root_password:    "root_pw"
     zabbix_db_password:     "StrongDBpass!"
     zabbix_admin_password:  "zabbix"
     php_timezone:           "Africa/Casablanca"
-
+    
     zabbix_db_name:         zabbix
     zabbix_db_user:         zabbix
-
-    # ─────── GPG-key map that works for every lookup path ───────
+    
+    # ─────── GPG-key map - use integer keys only ───────
     zabbix_repo_gpg_key:
-      "50": 082AB56BA14FE591    # string key  ← needed by first lookup
-      50:   082AB56BA14FE591    # integer key ← needed by second lookup
-
+      50: 082AB56BA14FE591    # Zabbix 5.0 GPG key
+  
   pre_tasks:
     # 0️⃣  Minimal packages (Debian / Ubuntu).  Add yum block for RHEL if needed
     - name: Install MariaDB and PHP stack (Debian & Ubuntu)
@@ -33,26 +31,26 @@
         state: present
         update_cache: true
       when: ansible_os_family == 'Debian'
-
+    
     # 1️⃣  Fix datadir perms cleanly
     - name: Stop MariaDB before fixing /var/lib/mysql ownership
       service:
         name: mariadb
         state: stopped
-
+    
     - name: Ensure /var/lib/mysql owned by mysql:mysql (mode 0755)
       file:
         path: /var/lib/mysql
         owner: mysql
         group: mysql
         mode: '0755'
-
+    
     - name: Start & enable MariaDB
       service:
         name: mariadb
         state: started
         enabled: true
-
+    
     # 2️⃣  Create Zabbix DB & user (idempotent via root socket login)
     - name: Create Zabbix database and user
       shell: |
@@ -67,7 +65,7 @@
         EOSQL
       args:
         executable: /bin/bash
-
+  
   roles:
     - role: dj-wasabi.zabbix-server
       vars:
@@ -80,18 +78,18 @@
         zabbix_api_create_user:       true
         zabbix_api_login_user:        Admin
         zabbix_api_login_pass:        "{{ zabbix_admin_password }}"
-
+    
     - role: dj-wasabi.zabbix-web
       vars:
         zabbix_web_version:           "{{ zabbix_version }}"
         zabbix_web_timezone:          "{{ php_timezone }}"
         zabbix_web_language:          en_US
-
+    
     - role: dj-wasabi.zabbix-agent
       vars:
         zabbix_agent_server:          127.0.0.1
         zabbix_agent_serveractive:    127.0.0.1
-
+  
   post_tasks:
     - name: Show Zabbix URL & default login
       debug:
