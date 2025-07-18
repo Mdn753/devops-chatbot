@@ -16,9 +16,7 @@
     zabbix_db_name:         zabbix
     zabbix_db_user:         zabbix
     
-    # ─────── GPG-key map - for Zabbix 6.0 ───────
-    zabbix_repo_gpg_key:
-      60: 082AB56BA14FE591    # Zabbix 6.0 GPG key
+    # ─────── Let the role handle GPG keys automatically ───────
   
   pre_tasks:
     # 0️⃣  Minimal packages (Debian / Ubuntu).  Add yum block for RHEL if needed
