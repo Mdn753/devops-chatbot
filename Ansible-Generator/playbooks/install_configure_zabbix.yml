@@ -1,32 +1,56 @@
 ---
 # install_zabbix_6_manual.yml
+# One-host “all-in-one” deployment of Zabbix 6 LTS on Ubuntu / Debian
+
 - name: Zabbix 6.0 LTS — manual installation
-  hosts: all
+  hosts: all                # use your “vms” inventory in AWX
   become: true
   gather_facts: true
 
+  ####################################################################
+  # 0 • Parameters (override from an AWX Survey if you like)
+  ####################################################################
   vars:
+    # Zabbix release
     zabbix_version:          "6.0"
+
+    # DB / UI credentials
     mysql_root_password:     "root_pw"
     zabbix_db_password:      "StrongDBpass!"
     zabbix_admin_password:   "zabbix"
-    php_timezone:            "Africa/Casablanca"
 
+    # Misc settings
+    php_timezone:            "Africa/Casablanca"
     zabbix_db_name:          zabbix
     zabbix_db_user:          zabbix
 
-    # map unsupported Ubuntu releases → jammy (22.04)
+    # Zabbix supplies repos only for Jammy 22.04, Focal 20.04, Bionic 18.04
     zbx_series: >-
       {% set rel = ansible_distribution_release %}
-      {{ rel if rel in ['jammy', 'focal', 'bionic'] else 'jammy' }}
+      {{ rel if rel in ['jammy','focal','bionic'] else 'jammy' }}
 
     zbx_keyring: /usr/share/keyrings/zabbix.gpg
 
-  ##################################################################
+  ####################################################################
   # TASKS
-  ##################################################################
+  ####################################################################
   tasks:
-    # 1. base packages --------------------------------------------------
+    ##################################################################
+    # Derive a legal agent hostname (must start with letter/number)
+    ##################################################################
+    - name: Derive clean Zabbix agent hostname
+      set_fact:
+        zbx_agent_hostname: >-
+          {{
+            (inventory_hostname
+             | regex_replace('^[^A-Za-z0-9]+', '')     # strip leading junk
+             | regex_replace('[^A-Za-z0-9._-]', '_')   # convert inner junk
+            ) or 'localhost'
+          }}
+
+    ##################################################################
+    # 1 • Base packages
+    ##################################################################
     - name: Install MariaDB, Apache/PHP & helper tools
       apt:
         name:
@@ -45,14 +69,14 @@
           - lsb-release
           - ca-certificates
         state: present
-        update_cache: yes
+        update_cache: true
       when: ansible_os_family == "Debian"
 
-    # 2. MariaDB datadir perms -----------------------------------------
+    ##################################################################
+    # 2 • MariaDB datadir ownership
+    ##################################################################
     - name: Stop MariaDB
-      service:
-        name: mariadb
-        state: stopped
+      service: { name: mariadb, state: stopped }
 
     - name: Ensure /var/lib/mysql owned by mysql:mysql
       file:
@@ -62,13 +86,12 @@
         mode: "0755"
 
     - name: Start & enable MariaDB
-      service:
-        name: mariadb
-        state: started
-        enabled: yes
+      service: { name: mariadb, state: started, enabled: yes }
 
-    # 3. create DB + user ----------------------------------------------
-    - name: Create Zabbix DB and user (idempotent)
+    ##################################################################
+    # 3 • Create DB & user (idempotent)
+    ##################################################################
+    - name: Create Zabbix DB and user
       shell: |
         mysql --protocol=socket -uroot <<'EOSQL'
         CREATE DATABASE IF NOT EXISTS {{ zabbix_db_name }}
@@ -79,18 +102,18 @@
           '{{ zabbix_db_user }}'@'localhost';
         FLUSH PRIVILEGES;
         EOSQL
-      args:
-        executable: /bin/bash
+      args: { executable: /bin/bash }
 
-    # 4. Zabbix repository ---------------------------------------------
+    ##################################################################
+    # 4 • Add the official Zabbix repo
+    ##################################################################
     - name: Download and de-armor Zabbix GPG key
       shell: |
         curl -fsSL https://repo.zabbix.com/zabbix-official-repo.key |
         gpg --dearmor -o {{ zbx_keyring }}
-      args:
-        creates: "{{ zbx_keyring }}"
+      args: { creates: "{{ zbx_keyring }}" }
 
-    - name: Add Zabbix apt repository
+    - name: Add Zabbix APT repository
       apt_repository:
         repo: >-
           deb [arch=amd64 signed-by={{ zbx_keyring }}]
@@ -100,8 +123,10 @@
         state: present
         update_cache: yes
 
-    # 5. Zabbix packages -----------------------------------------------
-    - name: Install Zabbix server, frontend, agent
+    ##################################################################
+    # 5 • Install Zabbix packages
+    ##################################################################
+    - name: Install Zabbix server, web frontend & agent
       apt:
         name:
           - zabbix-server-mysql
@@ -112,8 +137,10 @@
         state: present
         update_cache: yes
 
-    # 6. import schema if DB empty -------------------------------------
-    - name: Count tables
+    ##################################################################
+    # 6 • Import schema if DB is empty
+    ##################################################################
+    - name: Count tables in {{ zabbix_db_name }}
       shell: |
         mysql -N -s -u{{ zabbix_db_user }} -p{{ zabbix_db_password }} {{ zabbix_db_name }} \
           -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='{{ zabbix_db_name }}';" || echo 0
@@ -128,11 +155,12 @@
                 -u{{ zabbix_db_user }} -p{{ zabbix_db_password }} {{ zabbix_db_name }}
         done
       when: tblcount.stdout | int == 0
-      args:
-        executable: /bin/bash
+      args: { executable: /bin/bash }
 
-    # 7. zabbix_server.conf + PHP timezone -----------------------------
-    - name: Configure server DB settings
+    ##################################################################
+    # 7 • Configure zabbix_server.conf and PHP timezone
+    ##################################################################
+    - name: Configure Zabbix server DB settings
       lineinfile:
         path: /etc/zabbix/zabbix_server.conf
         regexp: "{{ item.regexp }}"
@@ -153,22 +181,27 @@
         backup: yes
       notify: restart apache
 
-    # 8. Configure agent -----------------------------------------------
-    - name: Configure agent
+    ##################################################################
+    # 8 • Configure agent (remove bad line, add good one)
+    ##################################################################
+    - name: Remove any malformed Hostname line
       lineinfile:
         path: /etc/zabbix/zabbix_agentd.conf
-        regexp: "{{ item.regexp }}"
-        line:   "{{ item.line }}"
-        state:  "{{ item.state | default('present') }}"
-        backup: yes
-      loop:
-        - { regexp: '^Hostname==', line: '',  state: absent }       # remove bad line
-        - { regexp: '^Server=',       line: 'Server=127.0.0.1' }
-        - { regexp: '^ServerActive=', line: 'ServerActive=127.0.0.1' }
-        - { regexp: '^Hostname=',     line: 'Hostname={{ inventory_hostname }}' }
+        regexp: '^Hostname=='
+        state: absent
       notify: restart zabbix-agent
 
-    # 9. enable / start services ---------------------------------------
+    - name: Set clean Hostname in agent conf
+      lineinfile:
+        path: /etc/zabbix/zabbix_agentd.conf
+        regexp: '^Hostname='
+        line:   "Hostname={{ zbx_agent_hostname }}"
+        backup: yes
+      notify: restart zabbix-agent
+
+    ##################################################################
+    # 9 • Enable & start services
+    ##################################################################
     - name: Enable and start services
       systemd:
         name: "{{ item }}"
@@ -179,20 +212,18 @@
         - zabbix-agent
         - apache2
 
-    # 10. waits ---------------------------------------------------------
+    ##################################################################
+    # 10 • Wait until services listen
+    ##################################################################
     - name: Wait for Zabbix server port
-      wait_for:
-        host: 127.0.0.1
-        port: 10051
-        timeout: 120
+      wait_for: { host: 127.0.0.1, port: 10051, timeout: 120 }
 
     - name: Wait for Apache
-      wait_for:
-        host: 127.0.0.1
-        port: 80
-        timeout: 30
+      wait_for: { host: 127.0.0.1, port: 80, timeout: 30 }
 
-    # 11. Banner --------------------------------------------------------
+    ##################################################################
+    # 11 • Finish banner
+    ##################################################################
     - name: Show installation summary
       debug:
         msg: |
@@ -200,25 +231,19 @@
           Zabbix 6.0 LTS installation complete!
           UI   : http://{{ ansible_default_ipv4.address }}/zabbix
           Login: Admin / {{ zabbix_admin_password }}
-          DB   : {{ zabbix_db_name }}  (user {{ zabbix_db_user }})
+          DB   : {{ zabbix_db_name }} (user {{ zabbix_db_user }})
           Services zabbix-server, zabbix-agent, apache2 are enabled.
           ================================================
 
-  ##################################################################
+  ####################################################################
   # HANDLERS
-  ##################################################################
+  ####################################################################
   handlers:
     - name: restart zabbix-server
-      systemd:
-        name: zabbix-server
-        state: restarted
+      systemd: { name: zabbix-server, state: restarted }
 
     - name: restart zabbix-agent
-      systemd:
-        name: zabbix-agent
-        state: restarted
+      systemd: { name: zabbix-agent, state: restarted }
 
     - name: restart apache
-      systemd:
-        name: apache2
-        state: restarted
+      systemd: { name: apache2, state: restarted }
