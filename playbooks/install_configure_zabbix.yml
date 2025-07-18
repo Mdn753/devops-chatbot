@@ -1,11 +1,11 @@
 ---
 - name: Zabbix 5 LTS — server • web • agent (all-in-one VM)
-  hosts: all            # AWX inventory “vms”
+  hosts: all              # inventory “vms”
   become: true
   gather_facts: true
 
   vars:
-    # ── secrets you’ll override via an AWX Survey ────────────────
+    # ─── secrets you may expose via an AWX Survey ──────────────
     zabbix_version:        "5.0"
 
     mysql_root_password:   "root_pw"
@@ -16,12 +16,15 @@
     zabbix_db_name:  zabbix
     zabbix_db_user:  zabbix
 
-    # ── REQUIRED: GPG key map with *string* index "50" ───────────
+    # ─── GPG-key map — key **50** must be an integer, not a string
     zabbix_repo_gpg_key:
-      '50': '082AB56BA14FE591'      # ← quoted ‟50” fixes the lookup error
+      50: 082AB56BA14FE591     # ← NO quotes around 50
 
   pre_tasks:
-    - name: Install MariaDB + minimal PHP stack (Debian/Ubuntu)
+    # ------------------------------------------------------------------
+    # 0️⃣  Minimal packages (Debian / Ubuntu).  Add a yum block for RHEL
+    # ------------------------------------------------------------------
+    - name: Install MariaDB + minimal PHP stack
       apt:
         name:
           - mariadb-server
@@ -31,7 +34,10 @@
         update_cache: true
       when: ansible_os_family == 'Debian'
 
-    - name: Stop MariaDB before fixing perms
+    # ------------------------------------------------------------------
+    # 1️⃣  Fix datadir ownership cleanly
+    # ------------------------------------------------------------------
+    - name: Stop MariaDB
       service:
         name: mariadb
         state: stopped
@@ -49,7 +55,10 @@
         state: started
         enabled: true
 
-    - name: Create Zabbix database and user (idempotent)
+    # ------------------------------------------------------------------
+    # 2️⃣  Create database and user (idempotent)
+    # ------------------------------------------------------------------
+    - name: Create zabbix database and user
       shell: |
         mysql --protocol=socket -uroot <<'EOSQL'
         CREATE DATABASE IF NOT EXISTS {{ zabbix_db_name }}
@@ -88,7 +97,7 @@
         zabbix_agent_serveractive:    127.0.0.1
 
   post_tasks:
-    - name: Zabbix URL and login hint
+    - name: Show Zabbix URL & credentials
       debug:
         msg: >
           Zabbix UI → http://{{ ansible_default_ipv4.address }}/zabbix
