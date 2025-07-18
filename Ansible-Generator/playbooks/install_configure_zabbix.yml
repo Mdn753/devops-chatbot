@@ -1,13 +1,13 @@
 ---
 # file: install_configure_zabbix.yml
-- name: Zabbix 5 LTS — server • web • agent (all-in-one VM)
+- name: Zabbix 6.0 LTS — server • web • agent (all-in-one VM)
   hosts: all                       # AWX inventory "vms"
   become: true
   gather_facts: true
   
   vars:
     # ─────── override these via an AWX Survey if you like ───────
-    zabbix_version:         "5.0"
+    zabbix_version:         "6.0"
     mysql_root_password:    "root_pw"
     zabbix_db_password:     "StrongDBpass!"
     zabbix_admin_password:  "zabbix"
@@ -16,9 +16,9 @@
     zabbix_db_name:         zabbix
     zabbix_db_user:         zabbix
     
-    # ─────── GPG-key map - use integer keys only ───────
+    # ─────── GPG-key map - for Zabbix 6.0 ───────
     zabbix_repo_gpg_key:
-      50: 082AB56BA14FE591    # Zabbix 5.0 GPG key
+      60: 082AB56BA14FE591    # Zabbix 6.0 GPG key
   
   pre_tasks:
     # 0️⃣  Minimal packages (Debian / Ubuntu).  Add yum block for RHEL if needed
