@@ -1,34 +1,38 @@
 ---
 # install_zabbix_6_manual.yml
-- name: Zabbix 6.0 LTS — Manual installation
-  hosts: all
+# One-host “all-in-one” install of Zabbix 6 LTS on Ubuntu / Debian
+
+- name: Zabbix 6.0 LTS — manual installation
+  hosts: all                     # use your “vms” inventory in AWX
   become: true
   gather_facts: true
 
+  #######################################################################
+  # 0 — Variables you might override from an AWX survey
+  #######################################################################
   vars:
-    # ▸ Editable (Survey) parameters
     zabbix_version:          "6.0"
+
     mysql_root_password:     "root_pw"
     zabbix_db_password:      "StrongDBpass!"
     zabbix_admin_password:   "zabbix"
     php_timezone:            "Africa/Casablanca"
 
-    # ▸ Database names
-    zabbix_db_name: zabbix
-    zabbix_db_user: zabbix
+    zabbix_db_name:          zabbix
+    zabbix_db_user:          zabbix
 
-    # ▸ Map unsupported Ubuntu codenames → jammy
+    # Map unsupported codenames (noble/plucky) → jammy (22.04)
     zbx_series: >-
       {% set rel = ansible_distribution_release %}
       {{ rel if rel in ['jammy', 'focal', 'bionic'] else 'jammy' }}
 
-    # ▸ GPG key destination
     zbx_keyring: /usr/share/keyrings/zabbix.gpg
 
+  #######################################################################
+  # Tasks
+  #######################################################################
   tasks:
-  # ─────────────────────────────────────────────────────────────
-  # 1.  Packages we always need
-  # ─────────────────────────────────────────────────────────────
+  # 1. Base packages ----------------------------------------------------
   - name: Install MariaDB, Apache/PHP & helper tools
     apt:
       name:
@@ -50,31 +54,22 @@
       update_cache: yes
     when: ansible_os_family == 'Debian'
 
-  # ─────────────────────────────────────────────────────────────
-  # 2.  Fix MariaDB datadir ownership
-  # ─────────────────────────────────────────────────────────────
+  # 2. MariaDB datadir ownership ----------------------------------------
   - name: Stop MariaDB
-    service:
-      name: mariadb
-      state: stopped
+    service: { name: mariadb, state: stopped }
 
   - name: Ensure /var/lib/mysql owned by mysql:mysql
     file:
       path: /var/lib/mysql
       owner: mysql
       group: mysql
-      mode: '0755'
+      mode: "0755"
 
   - name: Start & enable MariaDB
-    service:
-      name: mariadb
-      state: started
-      enabled: yes
+    service: { name: mariadb, state: started, enabled: yes }
 
-  # ─────────────────────────────────────────────────────────────
-  # 3.  Create Zabbix DB & user (idempotent)
-  # ─────────────────────────────────────────────────────────────
-  - name: Create database and user
+  # 3. DB + user (idempotent) -------------------------------------------
+  - name: Create Zabbix database and user
     shell: |
       mysql --protocol=socket -uroot <<'EOSQL'
       CREATE DATABASE IF NOT EXISTS {{ zabbix_db_name }}
@@ -85,12 +80,9 @@
         '{{ zabbix_db_user }}'@'localhost';
       FLUSH PRIVILEGES;
       EOSQL
-    args:
-      executable: /bin/bash
+    args: { executable: /bin/bash }
 
-  # ─────────────────────────────────────────────────────────────
-  # 4.  Add the official Zabbix repo (Jammy/Focal/Bionic)
-  # ─────────────────────────────────────────────────────────────
+  # 4. Zabbix repository -------------------------------------------------
   - name: Download and de-armor Zabbix GPG key
     shell: |
       curl -fsSL https://repo.zabbix.com/zabbix-official-repo.key |
@@ -98,7 +90,7 @@
     args:
       creates: "{{ zbx_keyring }}"
 
-  - name: Add Zabbix apt repository
+  - name: Add Zabbix APT repository
     apt_repository:
       repo: >-
         deb [arch=amd64 signed-by={{ zbx_keyring }}]
@@ -108,9 +100,7 @@
       state: present
       update_cache: yes
 
-  # ─────────────────────────────────────────────────────────────
-  # 5.  Install Zabbix packages
-  # ─────────────────────────────────────────────────────────────
+  # 5. Zabbix packages ---------------------------------------------------
   - name: Install Zabbix server, web frontend & agent
     apt:
       name:
@@ -122,66 +112,62 @@
       state: present
       update_cache: yes
 
-  # ─────────────────────────────────────────────────────────────
-  # 6.  Import schema only if DB is empty
-  # ─────────────────────────────────────────────────────────────
-  - name: Check whether DB already populated
+  # 6. Import schema if DB empty ----------------------------------------
+  - name: Count tables in {{ zabbix_db_name }}
     shell: |
       mysql -N -s -u{{ zabbix_db_user }} -p{{ zabbix_db_password }} {{ zabbix_db_name }} \
         -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='{{ zabbix_db_name }}';" || echo 0
-    register: tablecount
+    register: tblcount
     changed_when: false
 
-  - name: Import initial schema & data
+  - name: Import schema, images, data
     shell: |
-      zcat /usr/share/zabbix-sql-scripts/mysql/server.sql.gz | \
-      mysql --default-character-set=utf8mb4 -u{{ zabbix_db_user }} -p{{ zabbix_db_password }} {{ zabbix_db_name }}
-    when: tablecount.stdout | int == 0
-    args:
-      executable: /bin/bash
+      for f in schema.sql.gz images.sql.gz data.sql.gz; do
+        zcat /usr/share/zabbix-sql-scripts/mysql/$f | \
+        mysql --default-character-set=utf8mb4 \
+              -u{{ zabbix_db_user }} -p{{ zabbix_db_password }} {{ zabbix_db_name }}
+      done
+    when: tblcount.stdout | int == 0
+    args: { executable: /bin/bash }
 
-  # ─────────────────────────────────────────────────────────────
-  # 7.  Configure Zabbix server and PHP
-  # ─────────────────────────────────────────────────────────────
+  # 7. zabbix_server.conf + PHP timezone ---------------------------------
   - name: Configure Zabbix server DB connection
     lineinfile:
       path: /etc/zabbix/zabbix_server.conf
       regexp: "{{ item.regexp }}"
-      line: "{{ item.line }}"
+      line:   "{{ item.line }}"
       backup: yes
     loop:
-      - { regexp: '^DBHost=',        line: 'DBHost=localhost' }
-      - { regexp: '^DBName=',        line: 'DBName={{ zabbix_db_name }}' }
-      - { regexp: '^DBUser=',        line: 'DBUser={{ zabbix_db_user }}' }
-      - { regexp: '^#?DBPassword=',  line: 'DBPassword={{ zabbix_db_password }}' }
+      - { regexp: '^DBHost=',       line: 'DBHost=localhost' }
+      - { regexp: '^DBName=',       line: 'DBName={{ zabbix_db_name }}' }
+      - { regexp: '^DBUser=',       line: 'DBUser={{ zabbix_db_user }}' }
+      - { regexp: '^#?DBPassword=', line: 'DBPassword={{ zabbix_db_password }}' }
     notify: restart zabbix-server
 
   - name: Configure PHP timezone
     lineinfile:
       path: /etc/zabbix/apache.conf
       regexp: '^\s*#?php_value date.timezone'
-      line: "        php_value date.timezone {{ php_timezone }}"
+      line:  "        php_value date.timezone {{ php_timezone }}"
       backup: yes
     notify: restart apache
 
-  # ─────────────────────────────────────────────────────────────
-  # 8.  Configure Zabbix agent
-  # ─────────────────────────────────────────────────────────────
+  # 8. Configure agent (fixing the double-equals bug) -------------------
   - name: Configure agent
     lineinfile:
       path: /etc/zabbix/zabbix_agentd.conf
       regexp: "{{ item.regexp }}"
-      line: "{{ item.line }}"
+      line:   "{{ item.line }}"
+      state: "{{ item.state | default('present') }}"
       backup: yes
     loop:
+      - { regexp: '^Hostname==', state: absent }                               # remove bad line if present
       - { regexp: '^Server=',       line: 'Server=127.0.0.1' }
       - { regexp: '^ServerActive=', line: 'ServerActive=127.0.0.1' }
-      - { regexp: '^Hostname=',     line: 'Hostname={{ inventory_hostname }}' }
+      - { regexp: '^Hostname=',     line: 'Hostname={{ inventory_hostname }}' } # correct line
     notify: restart zabbix-agent
 
-  # ─────────────────────────────────────────────────────────────
-  # 9.  Enable & start services
-  # ─────────────────────────────────────────────────────────────
+  # 9. Enable & start services ------------------------------------------
   - name: Enable & start services
     systemd:
       name: "{{ item }}"
@@ -192,14 +178,12 @@
       - zabbix-agent
       - apache2
 
-  # ─────────────────────────────────────────────────────────────
-  # 10. Wait until services listen
-  # ─────────────────────────────────────────────────────────────
+  # 10. Wait until services listen --------------------------------------
   - name: Wait for Zabbix server port
     wait_for:
       port: 10051
       host: 127.0.0.1
-      timeout: 60
+      timeout: 120
 
   - name: Wait for Apache
     wait_for:
@@ -207,36 +191,27 @@
       host: 127.0.0.1
       timeout: 30
 
-  # ─────────────────────────────────────────────────────────────
-  # 11. Final info
-  # ─────────────────────────────────────────────────────────────
-  - name: Show Zabbix installation details
+  # 11. Finish banner ----------------------------------------------------
+  - name: Show installation summary
     debug:
       msg: |
         ================================================
-        Zabbix 6.0 LTS Installation Complete!
-        --------------------------------
-        UI       : http://{{ ansible_default_ipv4.address }}/zabbix
-        Login    : Admin / {{ zabbix_admin_password }}
-        --------------------------------
-        DB name  : {{ zabbix_db_name }}
-        DB user  : {{ zabbix_db_user }}
-        Services : zabbix-server, zabbix-agent, apache2 (all enabled)
-        Change the default Admin password immediately!
+        Zabbix 6.0 LTS installation complete!
+        UI   : http://{{ ansible_default_ipv4.address }}/zabbix
+        Login: Admin / {{ zabbix_admin_password }}
+        DB   : {{ zabbix_db_name }}  (user {{ zabbix_db_user }})
+        Services zabbix-server, zabbix-agent, apache2 are enabled.
         ================================================
 
+  #######################################################################
+  # Handlers
+  #######################################################################
   handlers:
     - name: restart zabbix-server
-      systemd:
-        name: zabbix-server
-        state: restarted
+      systemd: { name: zabbix-server, state: restarted }
 
     - name: restart zabbix-agent
-      systemd:
-        name: zabbix-agent
-        state: restarted
+      systemd: { name: zabbix-agent, state: restarted }
 
     - name: restart apache
-      systemd:
-        name: apache2
-        state: restarted
+      systemd: { name: apache2, state: restarted }
