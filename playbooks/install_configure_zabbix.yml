@@ -1,31 +1,24 @@
 ---
 - name: Zabbix 5 LTS — server • web • agent (all-in-one VM)
-  hosts: all
+  hosts: all            # AWX inventory “vms”
   become: true
   gather_facts: true
 
   vars:
-    zabbix_version:        "5.0"
-    mysql_root_password:   "root_pw"
-    zabbix_db_password:    "StrongDBpass!"
-    zabbix_admin_password: "zabbix"
-    php_timezone:          "Africa/Casablanca"
+    # ── editable via AWX Survey (one copy only) ──────────────────
+    zabbix_version:         "5.0"
+
+    mysql_root_password:    "root_pw"
+    zabbix_db_password:     "StrongDBpass!"
+    zabbix_admin_password:  "zabbix"
+    php_timezone:           "Africa/Casablanca"
 
     zabbix_db_name:  zabbix
     zabbix_db_user:  zabbix
 
   pre_tasks:
-    # 0️⃣ Fix ownership of MariaDB datadir
-    - name: Ensure /var/lib/mysql is owned by mysql:mysql
-      file:
-        path: /var/lib/mysql
-        owner: mysql
-        group: mysql
-        recurse: true
-      notify: restart mariadb
-
-    # 1️⃣ Install packages (Debian shown; add yum block for RHEL if needed)
-    - name: Install MariaDB + minimal web stack
+    # 0️⃣ ensure needed pkgs (Debian example; add yum block for RHEL if used) —
+    - name: Install MariaDB + minimal PHP stack
       apt:
         name:
           - mariadb-server
@@ -33,17 +26,29 @@
           - php-mysql
         state: present
         update_cache: true
-      when: ansible_os_family == 'Debian'
+      when: ansible_os_family == "Debian"
 
-    # 2️⃣ Make sure MariaDB is running
-    - name: Ensure MariaDB running
+    # 1️⃣ stop mariadb, fix datadir perms, start again ————————————
+    - name: Stop MariaDB before fixing permissions
+      service:
+        name: mariadb
+        state: stopped
+
+    - name: Ensure /var/lib/mysql owned by mysql:mysql and mode 0755
+      file:
+        path: /var/lib/mysql
+        owner: mysql
+        group: mysql
+        mode: "0755"
+
+    - name: Start & enable MariaDB
       service:
         name: mariadb
         state: started
         enabled: true
 
-    # 3️⃣ Create Zabbix DB & user (idempotent)
-    - name: Create DB & user if missing
+    # 2️⃣ create DB + user (idempotent) ————————————————————————
+    - name: Create zabbix database and user (socket login)
       shell: |
         mysql --protocol=socket -uroot <<'EOSQL'
         CREATE DATABASE IF NOT EXISTS {{ zabbix_db_name }}
@@ -58,12 +63,14 @@
         executable: /bin/bash
 
   roles:
-    - dj-wasabi.zabbix-server
-    - dj-wasabi.zabbix-web
-    - dj-wasabi.zabbix-agent
+    - dj-wasabi.zabbix-server   # loads schema, configures server
+    - dj-wasabi.zabbix-web      # front-end & PHP TZ
+    - dj-wasabi.zabbix-agent    # local agent
 
-  handlers:
-    - name: restart mariadb
-      service:
-        name: mariadb
-        state: restarted
+  post_tasks:
+    - name: Zabbix URL & default login
+      debug:
+        msg: >
+          Zabbix UI → http://{{ ansible_default_ipv4.address }}/zabbix
+          • Login: Admin / {{ zabbix_admin_password }}
+
