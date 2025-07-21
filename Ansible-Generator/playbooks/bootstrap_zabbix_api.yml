@@ -1,262 +1,258 @@
 ---
 - name: Bootstrap Zabbix GUI via API
-  hosts: all
-  gather_facts: false
+  hosts: all                       # the Zabbix server
+  become: false
+  gather_facts: true               
+
   vars:
+    # -----------------------------------------------------------------
+    # API endpoint and credentials
+    # -----------------------------------------------------------------
     zbx_api_url: "http://{{ ansible_default_ipv4.address }}/zabbix/api_jsonrpc.php"
-    zbx_admin_user: "Admin"
-    zbx_admin_pass: "zabbix"
-    zbx_admin_new_pass: "admin@123"
-    zbx_api_user: "ansible"
-    zbx_api_password: "admin@123"
+
+
+    zbx_admin_user:     "Admin"
+    zbx_admin_pass:     "zabbix"          # factory default
+
+    zbx_admin_new_pass: "admin@123"       # new secure password
+
+    zbx_api_user:       "ansible"         # service account
+    zbx_api_password:   "admin@123"
 
   tasks:
-    - name: Get authentication token with default credentials
-      uri:
-        url: "{{ zbx_api_url }}"
-        method: POST
-        body_format: json
-        body:
-          jsonrpc: "2.0"
-          method: "user.login"
-          params:
-            user: "{{ zbx_admin_user }}"
-            password: "{{ zbx_admin_pass }}"
-          id: 1
-        headers:
-          Content-Type: "application/json"
-        status_code: 200
-      register: auth_result
+  # -------------------------------------------------------------------
+  # 0 - Wait until the web/API endpoint is reachable
+  # -------------------------------------------------------------------
+  - name: Wait until Zabbix API responds (port 80)
+    wait_for:
+      host: "{{ ansible_default_ipv4.address }}"
+      port: 80
+      timeout: 120
 
-    - name: Set auth token
-      set_fact:
-        auth_token: "{{ auth_result.json.result }}"
+  # -------------------------------------------------------------------
+  # 1 - Log in with default Admin / change its password
+  # -------------------------------------------------------------------
+  - name: Get authentication token with default credentials
+    uri:
+      url:        "{{ zbx_api_url }}"
+      method:     POST
+      body_format: json
+      body:
+        jsonrpc: "2.0"
+        method:  "user.login"
+        params:
+          user:     "{{ zbx_admin_user }}"
+          password: "{{ zbx_admin_pass }}"
+        id: 1
+      headers:    { Content-Type: "application/json" }
+      status_code: 200
+    register: auth_result
 
-    - name: Change default Admin password
-      uri:
-        url: "{{ zbx_api_url }}"
-        method: POST
-        body_format: json
-        body:
-          jsonrpc: "2.0"
-          method: "user.update"
-          params:
-            userid: "1"
-            passwd: "{{ zbx_admin_new_pass }}"
-          auth: "{{ auth_token }}"
-          id: 2
-        headers:
-          Content-Type: "application/json"
-        status_code: 200
-      register: password_change_result
+  - name: Change default Admin password
+    uri:
+      url:        "{{ zbx_api_url }}"
+      method:     POST
+      body_format: json
+      body:
+        jsonrpc: "2.0"
+        method:  "user.update"
+        params:
+          userid:  "1"
+          passwd:  "{{ zbx_admin_new_pass }}"
+        auth:     "{{ auth_result.json.result }}"
+        id: 2
+      headers:    { Content-Type: "application/json" }
+      status_code: 200
+    register: password_change_result
 
-    - name: Get new authentication token
-      uri:
-        url: "{{ zbx_api_url }}"
-        method: POST
-        body_format: json
-        body:
-          jsonrpc: "2.0"
-          method: "user.login"
-          params:
-            user: "{{ zbx_admin_user }}"
-            password: "{{ zbx_admin_new_pass }}"
-          id: 3
-        headers:
-          Content-Type: "application/json"
-        status_code: 200
-      register: new_auth_result
+  # -------------------------------------------------------------------
+  # 2 - Log in again with new Admin PW; create “ansible” API user
+  # -------------------------------------------------------------------
+  - name: Get new admin token
+    uri:
+      url:        "{{ zbx_api_url }}"
+      method:     POST
+      body_format: json
+      body:
+        jsonrpc: "2.0"
+        method:  "user.login"
+        params:
+          user:     "{{ zbx_admin_user }}"
+          password: "{{ zbx_admin_new_pass }}"
+        id: 3
+      headers:    { Content-Type: "application/json" }
+      status_code: 200
+    register: new_auth_result
 
-    - name: Set new auth token
-      set_fact:
-        new_auth_token: "{{ new_auth_result.json.result }}"
+  - name: Check if ansible user exists
+    uri:
+      url:        "{{ zbx_api_url }}"
+      method:     POST
+      body_format: json
+      body:
+        jsonrpc: "2.0"
+        method:  "user.get"
+        params:
+          filter: { alias: "{{ zbx_api_user }}" }
+        auth:     "{{ new_auth_result.json.result }}"
+        id: 4
+      headers:    { Content-Type: "application/json" }
+      status_code: 200
+    register: user_check_result
 
-    - name: Check if ansible user already exists
-      uri:
-        url: "{{ zbx_api_url }}"
-        method: POST
-        body_format: json
-        body:
-          jsonrpc: "2.0"
-          method: "user.get"
-          params:
-            filter:
-              alias: "{{ zbx_api_user }}"
-          auth: "{{ new_auth_token }}"
-          id: 4
-        headers:
-          Content-Type: "application/json"
-        status_code: 200
-      register: user_check_result
+  - name: Create ansible API user (if absent)
+    uri:
+      url:        "{{ zbx_api_url }}"
+      method:     POST
+      body_format: json
+      body:
+        jsonrpc: "2.0"
+        method:  "user.create"
+        params:
+          alias:  "{{ zbx_api_user }}"
+          name:   "Ansible Automation"
+          passwd: "{{ zbx_api_password }}"
+          type:   3                       # Zabbix Super Admin
+          usrgrps:
+            - usrgrpid: "7"              # “Zabbix administrators”
+        auth:     "{{ new_auth_result.json.result }}"
+        id: 5
+      headers:    { Content-Type: "application/json" }
+      status_code: 200
+    when: user_check_result.json.result | length == 0
+    register: user_create_result
 
-    - name: Create ansible API user
-      uri:
-        url: "{{ zbx_api_url }}"
-        method: POST
-        body_format: json
-        body:
-          jsonrpc: "2.0"
-          method: "user.create"
-          params:
-            alias: "{{ zbx_api_user }}"
-            name: "Ansible Automation"
-            passwd: "{{ zbx_api_password }}"
-            type: 3
-            usrgrps:
-              - usrgrpid: "7"
-          auth: "{{ new_auth_token }}"
-          id: 5
-        headers:
-          Content-Type: "application/json"
-        status_code: 200
-      register: user_create_result
-      when: user_check_result.json.result | length == 0
+  # -------------------------------------------------------------------
+  # 3 - Log in as ansible user; create host group & host
+  # -------------------------------------------------------------------
+  - name: Login as ansible API user
+    uri:
+      url:        "{{ zbx_api_url }}"
+      method:     POST
+      body_format: json
+      body:
+        jsonrpc: "2.0"
+        method:  "user.login"
+        params:
+          user:     "{{ zbx_api_user }}"
+          password: "{{ zbx_api_password }}"
+        id: 6
+      headers:    { Content-Type: "application/json" }
+      status_code: 200
+    register: api_auth_result
 
-    - name: Get API user authentication token
-      uri:
-        url: "{{ zbx_api_url }}"
-        method: POST
-        body_format: json
-        body:
-          jsonrpc: "2.0"
-          method: "user.login"
-          params:
-            user: "{{ zbx_api_user }}"
-            password: "{{ zbx_api_password }}"
-          id: 6
-        headers:
-          Content-Type: "application/json"
-        status_code: 200
-      register: api_auth_result
+  - name: Ensure host group Linux
+    uri:
+      url:        "{{ zbx_api_url }}"
+      method:     POST
+      body_format: json
+      body:
+        jsonrpc: "2.0"
+        method:  "hostgroup.get"
+        params:
+          filter: { name: ["Linux"] }
+        auth:  "{{ api_auth_result.json.result }}"
+        id: 7
+      headers:    { Content-Type: "application/json" }
+      status_code: 200
+    register: hostgroup_check_result
 
-    - name: Set API auth token
-      set_fact:
-        api_auth_token: "{{ api_auth_result.json.result }}"
+  - name: Create host group Linux if missing
+    uri:
+      url: "{{ zbx_api_url }}"
+      method: POST
+      body_format: json
+      body:
+        jsonrpc: "2.0"
+        method:  "hostgroup.create"
+        params:  { name: "Linux" }
+        auth:    "{{ api_auth_result.json.result }}"
+        id: 8
+      headers: { Content-Type: "application/json" }
+      status_code: 200
+    when: hostgroup_check_result.json.result | length == 0
+    register: hostgroup_create_result
 
-    - name: Check if Linux host group exists
-      uri:
-        url: "{{ zbx_api_url }}"
-        method: POST
-        body_format: json
-        body:
-          jsonrpc: "2.0"
-          method: "hostgroup.get"
-          params:
-            filter:
-              name: ["Linux"]
-          auth: "{{ api_auth_token }}"
-          id: 7
-        headers:
-          Content-Type: "application/json"
-        status_code: 200
-      register: hostgroup_check_result
+  - name: Obtain Linux host group ID
+    uri:
+      url: "{{ zbx_api_url }}"
+      method: POST
+      body_format: json
+      body:
+        jsonrpc: "2.0"
+        method:  "hostgroup.get"
+        params:  { filter: { name: ["Linux"] } }
+        auth:    "{{ api_auth_result.json.result }}"
+        id: 9
+      headers: { Content-Type: "application/json" }
+      status_code: 200
+    register: hostgroup_get_result
 
-    - name: Create Linux host group
-      uri:
-        url: "{{ zbx_api_url }}"
-        method: POST
-        body_format: json
-        body:
-          jsonrpc: "2.0"
-          method: "hostgroup.create"
-          params:
-            name: "Linux"
-          auth: "{{ api_auth_token }}"
-          id: 8
-        headers:
-          Content-Type: "application/json"
-        status_code: 200
-      register: hostgroup_create_result
-      when: hostgroup_check_result.json.result | length == 0
+  - name: Obtain template ID (Linux by agent active)
+    uri:
+      url: "{{ zbx_api_url }}"
+      method: POST
+      body_format: json
+      body:
+        jsonrpc: "2.0"
+        method:  "template.get"
+        params:  { filter: { name: ["Linux by Zabbix agent active"] } }
+        auth:    "{{ api_auth_result.json.result }}"
+        id: 10
+      headers: { Content-Type: "application/json" }
+      status_code: 200
+    register: template_get_result
 
-    - name: Get Linux host group ID
-      uri:
-        url: "{{ zbx_api_url }}"
-        method: POST
-        body_format: json
-        body:
-          jsonrpc: "2.0"
-          method: "hostgroup.get"
-          params:
-            filter:
-              name: ["Linux"]
-          auth: "{{ api_auth_token }}"
-          id: 9
-        headers:
-          Content-Type: "application/json"
-        status_code: 200
-      register: hostgroup_get_result
+  - name: Check if host exists
+    uri:
+      url: "{{ zbx_api_url }}"
+      method: POST
+      body_format: json
+      body:
+        jsonrpc: "2.0"
+        method:  "host.get"
+        params:  { filter: { host: ["{{ inventory_hostname }}"] } }
+        auth:    "{{ api_auth_result.json.result }}"
+        id: 11
+      headers: { Content-Type: "application/json" }
+      status_code: 200
+    register: host_check_result
 
-    - name: Get template ID for Linux by Zabbix agent active
-      uri:
-        url: "{{ zbx_api_url }}"
-        method: POST
-        body_format: json
-        body:
-          jsonrpc: "2.0"
-          method: "template.get"
-          params:
-            filter:
-              name: ["Linux by Zabbix agent active"]
-          auth: "{{ api_auth_token }}"
-          id: 10
-        headers:
-          Content-Type: "application/json"
-        status_code: 200
-      register: template_get_result
+  - name: Register the Zabbix server itself as a host
+    uri:
+      url: "{{ zbx_api_url }}"
+      method: POST
+      body_format: json
+      body:
+        jsonrpc: "2.0"
+        method:  "host.create"
+        params:
+          host: "{{ inventory_hostname }}"
+          name: "{{ inventory_hostname }}"
+          interfaces:
+            - type: 1
+              main: 1
+              useip: 1
+              ip: "{{ ansible_default_ipv4.address }}"
+              dns: ""
+              port: "10050"
+          groups:
+            - groupid: "{{ hostgroup_get_result.json.result[0].groupid }}"
+          templates:
+            - templateid: "{{ template_get_result.json.result[0].templateid }}"
+        auth: "{{ api_auth_result.json.result }}"
+        id: 12
+      headers: { Content-Type: "application/json" }
+      status_code: 200
+    when: host_check_result.json.result | length == 0
 
-    - name: Check if host already exists
-      uri:
-        url: "{{ zbx_api_url }}"
-        method: POST
-        body_format: json
-        body:
-          jsonrpc: "2.0"
-          method: "host.get"
-          params:
-            filter:
-              host: ["{{ inventory_hostname }}"]
-          auth: "{{ api_auth_token }}"
-          id: 11
-        headers:
-          Content-Type: "application/json"
-        status_code: 200
-      register: host_check_result
-
-    - name: Register the Zabbix server as a host
-      uri:
-        url: "{{ zbx_api_url }}"
-        method: POST
-        body_format: json
-        body:
-          jsonrpc: "2.0"
-          method: "host.create"
-          params:
-            host: "{{ inventory_hostname }}"
-            name: "{{ inventory_hostname }}"
-            interfaces:
-              - type: 1
-                main: 1
-                useip: 1
-                ip: "{{ lookup('ansible.builtin.pipe', 'hostname -I').split()[0] }}"
-                dns: ""
-                port: "10050"
-            groups:
-              - groupid: "{{ hostgroup_get_result.json.result[0].groupid }}"
-            templates:
-              - templateid: "{{ template_get_result.json.result[0].templateid }}"
-          auth: "{{ api_auth_token }}"
-          id: 12
-        headers:
-          Content-Type: "application/json"
-        status_code: 200
-      register: host_create_result
-      when: host_check_result.json.result | length == 0
-
-    - name: Display results
-      debug:
-        msg: 
-          - "Admin password changed: {{ 'Success' if password_change_result.json.result is defined else 'Failed' }}"
-          - "Ansible user created: {{ 'Success' if user_create_result.json.result is defined or user_check_result.json.result | length > 0 else 'Failed' }}"
-          - "Linux host group created: {{ 'Success' if hostgroup_create_result.json.result is defined or hostgroup_check_result.json.result | length > 0 else 'Failed' }}"
-          - "Host registered: {{ 'Success' if host_create_result.json.result is defined or host_check_result.json.result | length > 0 else 'Failed' }}"
+  # -------------------------------------------------------------------
+  # 4 - Final report
+  # -------------------------------------------------------------------
+  - name: Summary
+    debug:
+      msg:
+        - "Admin pwd change : {{ 'OK' if password_change_result.json.result is defined else 'FAILED' }}"
+        - "ansible user     : {{ 'OK' if (user_create_result is defined or user_check_result.json.result | length > 0) else 'FAILED' }}"
+        - "Linux group      : {{ 'OK' if (hostgroup_create_result is defined or hostgroup_check_result.json.result | length > 0) else 'FAILED' }}"
+        - "Host registered  : {{ 'OK' if (host_check_result.json.result | length > 0) else 'FAILED' }}"
