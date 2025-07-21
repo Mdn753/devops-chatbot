@@ -1,14 +1,12 @@
 ---
-# install_zabbix_6_manual.yml
-# One-host “all-in-one” deployment of Zabbix 6 LTS on Ubuntu / Debian
 
 - name: Zabbix 6.0 LTS — manual installation
-  hosts: all                # use your “vms” inventory in AWX
+  hosts: all                
   become: true
   gather_facts: true
 
   ####################################################################
-  # 0 • Parameters (override from an AWX Survey if you like)
+  # 0 • Parameters 
   ####################################################################
   vars:
     # Zabbix release
@@ -36,7 +34,7 @@
   ####################################################################
   tasks:
     ##################################################################
-    # Derive a legal agent hostname (must start with letter/number)
+    # Derive a legal agent hostname 
     ##################################################################
     - name: Derive clean Zabbix agent hostname
       set_fact:
@@ -182,7 +180,7 @@
       notify: restart apache
 
     ##################################################################
-    # 8 • Configure agent (remove bad line, add good one)
+    # 8 • Configure agent 
     ##################################################################
     - name: Remove any malformed Hostname line
       lineinfile:
