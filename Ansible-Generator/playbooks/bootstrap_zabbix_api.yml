@@ -1,49 +1,51 @@
 ---
-# bootstrap_zabbix_api.yml
-# — creates /etc/zabbix/web/zabbix.conf.php,
-#   changes Admin password, adds “ansible” API user,
-#   creates Linux host-group and registers the server itself.
-
 - name: Bootstrap Zabbix GUI via API
   hosts: all
   become: true
   gather_facts: true
 
-  #####################################################################
-  # Vars coming from your installer playbook
-  #####################################################################
   vars:
-    zbx_db_host:      "localhost"
+    # DB / UI parameters imported from the installer playbook
+    zbx_db_host:      localhost
     zbx_db_name:      "{{ zabbix_db_name | default('zabbix') }}"
     zbx_db_user:      "{{ zabbix_db_user | default('zabbix') }}"
     zbx_db_password:  "{{ zabbix_db_password | default('StrongDBpass!') }}"
 
     zbx_api_url: "http://{{ ansible_default_ipv4.address }}/zabbix/api_jsonrpc.php"
 
-    zbx_admin_user: "{{ 'Admin' }}"
-    zbx_admin_pass: "{{ zabbix_admin_password | default('zabbix') }}"
-    zbx_admin_new_pass: "admin@123"
+    zbx_admin_user:   Admin
+    zbx_admin_pass:   "{{ zabbix_admin_password | default('zabbix') }}"
+    zbx_admin_new_pass: admin@123
 
-    zbx_api_user:     "ansible"
-    zbx_api_password: "admin@123"
+    zbx_api_user:     ansible
+    zbx_api_password: admin@123
 
-    zbx_web_conf: /etc/zabbix/web/zabbix.conf.php   # Debian/Ubuntu path
+    zbx_web_conf_dir: /etc/zabbix/web
+    zbx_web_conf:     "{{ zbx_web_conf_dir }}/zabbix.conf.php"
 
   tasks:
-  #####################################################################
-  # 0 • ensure web config exists
-  #####################################################################
+  ##################################################################
+  # 0 • make sure the web-config directory exists
+  ##################################################################
+  - name: Ensure {{ zbx_web_conf_dir }} exists
+    file:
+      path: "{{ zbx_web_conf_dir }}"
+      state: directory
+      owner: www-data
+      group: www-data
+      mode: "0755"
+
   - name: Check if front-end config already exists
-    ansible.builtin.stat:
+    stat:
       path: "{{ zbx_web_conf }}"
     register: web_conf_stat
 
-  - name: Create front-end config (skip wizard)
+  - name: Create front-end config (skip setup wizard)
     copy:
-      dest:   "{{ zbx_web_conf }}"
-      owner:  www-data
-      group:  www-data
-      mode:   '0640'
+      dest: "{{ zbx_web_conf }}"
+      owner: www-data
+      group: www-data
+      mode:  "0640"
       content: |
         <?php
         $DB['TYPE']     = 'MYSQL';
@@ -58,6 +60,7 @@
         $IMAGE_FORMAT_DEFAULT = IMAGE_FORMAT_PNG;
         ?>
     when: not web_conf_stat.stat.exists
+
 
   #####################################################################
   # 1 • wait for API to answer
