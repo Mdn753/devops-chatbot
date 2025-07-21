@@ -1,11 +1,11 @@
 ---
-# bootstrap_zabbix_api.yml
+# bootstrap_zabbix_api.yml - Simplified Version
 # ------------------------------------------------------------
 # Idempotently configures the Zabbix GUI:
 #   • /etc/zabbix/zabbix.conf.php         (main location)
 #   • /usr/share/zabbix/conf/zabbix.conf.php  (symlink)
 #   • Reloads Apache if anything changed
-#   • Changes Admin password, creates "ansible" API user
+#   • Creates "ansible" API user (keeps Admin password as default)
 #   • Creates host-group Linux & registers this host
 
 - name: Bootstrap Zabbix GUI via API
@@ -26,7 +26,6 @@
 
     zbx_admin_user:     Admin
     zbx_admin_pass:     "{{ zabbix_admin_password | default('zabbix') }}"
-    zbx_admin_new_pass: admin@123
 
     zbx_api_user:       ansible
     zbx_api_password:   admin@123
@@ -106,8 +105,8 @@
         port: 80
         timeout: 120
 
-    # 2 ─ Login with factory Admin credentials
-    - name: Log in as Admin / default password
+    # 2 ─ Login with default Admin credentials (no password change)
+    - name: Log in as Admin with default password
       uri:
         url: "{{ zbx_api_url }}"
         method: POST
@@ -119,65 +118,6 @@
             username: "{{ zbx_admin_user }}"
             password: "{{ zbx_admin_pass }}"
           id: 1
-        headers:
-          Content-Type: application/json
-        status_code: 200
-      register: login_default
-
-    - name: Debug login response
-      debug:
-        var: login_default.json
-        verbosity: 0
-
-    - name: Abort if login failed
-      fail:
-        msg: >
-          Login with Admin / '{{ zbx_admin_pass }}' failed.
-          API error: {{ login_default.json.error | to_nice_json }}
-      when: login_default.json.result is not defined
-
-    - name: Set old admin token
-      set_fact:
-        admin_token_old: "{{ login_default.json.result }}"
-      when: login_default.json.result is defined
-
-    # 3 ─ Change Admin password
-    - name: Set new Admin password
-      uri:
-        url: "{{ zbx_api_url }}"
-        method: POST
-        body_format: json
-        body:
-          jsonrpc: "2.0"
-          method:  user.update
-          params:
-            userid: "1"
-            passwd: "{{ zbx_admin_new_pass }}"
-            current_passwd: "{{ zbx_admin_pass }}"
-          auth: "{{ admin_token_old }}"
-          id: 2
-        headers:
-          Content-Type: application/json
-        status_code: 200
-      register: password_change_result
-
-    - name: Debug password change response
-      debug:
-        var: password_change_result.json
-        verbosity: 0
-
-    - name: Log in with new Admin password
-      uri:
-        url: "{{ zbx_api_url }}"
-        method: POST
-        body_format: json
-        body:
-          jsonrpc: "2.0"
-          method:  user.login
-          params:
-            username: "{{ zbx_admin_user }}"
-            password: "{{ zbx_admin_new_pass }}"
-          id: 3
         headers:
           Content-Type: application/json
         status_code: 200
@@ -205,7 +145,7 @@
         msg: "Failed to get admin token. API response: {{ admin_login.json | to_nice_json }}"
       when: admin_login.json.result is not defined
 
-    # 4 ─ Ensure "ansible" API user exists
+    # 3 ─ Ensure "ansible" API user exists
     - name: Look up ansible user
       uri:
         url: "{{ zbx_api_url }}"
@@ -218,7 +158,7 @@
             filter:
               alias: "{{ zbx_api_user }}"
           auth: "{{ admin_token }}"
-          id: 4
+          id: 2
         headers:
           Content-Type: application/json
         status_code: 200
@@ -240,13 +180,13 @@
             usrgrps:
               - usrgrpid: "7"               # Zabbix administrators
           auth: "{{ admin_token }}"
-          id: 5
+          id: 3
         headers:
           Content-Type: application/json
         status_code: 200
       when: api_user_lookup.json.result | length == 0
 
-    # 5 ─ Login as ansible; create group & host
+    # 4 ─ Login as ansible; create group & host
     - name: Login as ansible
       uri:
         url: "{{ zbx_api_url }}"
@@ -258,7 +198,7 @@
           params:
             username: "{{ zbx_api_user }}"
             password: "{{ zbx_api_password }}"
-          id: 6
+          id: 4
         headers:
           Content-Type: application/json
         status_code: 200
@@ -287,7 +227,7 @@
           params:
             name: Linux
           auth: "{{ api_token }}"
-          id: 7
+          id: 5
         headers:
           Content-Type: application/json
         status_code: [200, 412]     # 412 = already exists
@@ -349,7 +289,7 @@
             templates:
               - templateid: "{{ linux_tmplid }}"
           auth: "{{ api_token }}"
-          id: 8
+          id: 6
         headers:
           Content-Type: application/json
         status_code: [200, 412]
@@ -357,12 +297,12 @@
         - linux_groupid is defined
         - linux_tmplid is defined
 
-    # 6 ─ Summary
+    # 5 ─ Summary
     - name: Bootstrap summary
       debug:
         msg: >
-          Zabbix GUI initialized; Admin password updated,
-          API user "{{ zbx_api_user }}" ready,
+          Zabbix GUI initialized with default Admin password 'zabbix',
+          API user "{{ zbx_api_user }}" created,
           host-group Linux and host {{ inventory_hostname }} present.
 
 #################################################################
