@@ -153,11 +153,18 @@
           params:
             userid: "1"
             passwd: "{{ zbx_admin_new_pass }}"
+            current_passwd: "{{ zbx_admin_pass }}"
           auth: "{{ admin_token_old }}"
           id: 2
         headers:
           Content-Type: application/json
         status_code: 200
+      register: password_change_result
+
+    - name: Debug password change response
+      debug:
+        var: password_change_result.json
+        verbosity: 0
 
     - name: Log in with new Admin password
       uri:
