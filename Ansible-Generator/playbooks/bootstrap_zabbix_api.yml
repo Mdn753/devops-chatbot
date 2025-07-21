@@ -6,7 +6,7 @@
     zbx_api_url: "http://{{ inventory_hostname }}/zabbix/api_jsonrpc.php"
     zbx_admin_user: "Admin"
     zbx_admin_pass: "zabbix"
-    zbx_admin_new_pass: "SuperSecretAdminPW"
+    zbx_admin_new_pass: "admin@123"
     zbx_api_user: "ansible"
     zbx_api_password: "admin@123"
 
