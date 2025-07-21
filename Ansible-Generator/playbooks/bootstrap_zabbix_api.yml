@@ -1,12 +1,12 @@
 ---
 # bootstrap_zabbix_api.yml
 # ------------------------------------------------------------
-# • Ensures front-end config exists and is readable
-# • Adds / refreshes a symlink in /usr/share/zabbix/conf/
-# • Flushes handlers so Apache fully reloads before API calls
-# • Changes Admin password, creates “ansible” API user
-# • Creates host-group Linux and registers this host
-# • Idempotent – safe to re-run
+# Idempotently configures the Zabbix GUI:
+#   • /etc/zabbix/zabbix.conf.php         (main location)
+#   • /usr/share/zabbix/conf/zabbix.conf.php  (symlink)
+#   • Reloads Apache if anything changed
+#   • Changes Admin password, creates “ansible” API user
+#   • Creates host-group Linux & registers this host
 
 - name: Bootstrap Zabbix GUI via API
   hosts: all
@@ -14,7 +14,7 @@
   gather_facts: true
 
   #################################################################
-  # Variables (inherited from the installer playbook)
+  # Variables (imported from installer playbook or defaults)
   #################################################################
   vars:
     zbx_db_host:        localhost
@@ -31,8 +31,8 @@
     zbx_api_user:       ansible
     zbx_api_password:   admin@123
 
-    zbx_web_conf_dir:   /etc/zabbix/web
-    zbx_web_conf:       "{{ zbx_web_conf_dir }}/zabbix.conf.php"
+    # primary config file & helper symlink
+    zbx_etc_conf:       /etc/zabbix/zabbix.conf.php
     zbx_share_conf_dir: /usr/share/zabbix/conf
     zbx_share_conf:     "{{ zbx_share_conf_dir }}/zabbix.conf.php"
 
@@ -40,10 +40,10 @@
   # TASKS
   #################################################################
   tasks:
-    # 0 ─ Ensure main config file exists and is readable
-    - name: Ensure {{ zbx_web_conf_dir }} exists
+    # 0 ─ Ensure /etc/zabbix exists & write config
+    - name: Ensure /etc/zabbix exists
       file:
-        path: "{{ zbx_web_conf_dir }}"
+        path: /etc/zabbix
         state: directory
         owner: www-data
         group: www-data
@@ -51,7 +51,7 @@
 
     - name: Create / update front-end config
       copy:
-        dest:   "{{ zbx_web_conf }}"
+        dest:   "{{ zbx_etc_conf }}"
         owner:  www-data
         group:  www-data
         mode:   "0640"
@@ -71,7 +71,7 @@
       register: copy_result
       notify: reload apache2
 
-    # 0-bis ─ Put (or refresh) symlink under /usr/share/zabbix/conf
+    # 0-bis ─ Symlink under /usr/share/zabbix/conf
     - name: Ensure {{ zbx_share_conf_dir }} exists
       file:
         path: "{{ zbx_share_conf_dir }}"
@@ -82,17 +82,17 @@
 
     - name: Link config into /usr/share/zabbix/conf
       file:
-        src:  "{{ zbx_web_conf }}"
+        src:  "{{ zbx_etc_conf }}"
         dest: "{{ zbx_share_conf }}"
         state: link
         force: yes
       register: link_result
       notify: reload apache2
 
-    # flush handlers now → Apache fully reloaded before API calls
+    # flush handlers – reload Apache **now**
     - meta: flush_handlers
 
-    - name: Wait for Apache after a reload
+    - name: Wait for Apache after reload
       wait_for:
         host: "{{ ansible_default_ipv4.address }}"
         port: 80
@@ -114,7 +114,7 @@
         body_format: json
         body:
           jsonrpc: "2.0"
-          method: user.login
+          method:  user.login
           params:
             user:     "{{ zbx_admin_user }}"
             password: "{{ zbx_admin_pass }}"
@@ -203,9 +203,9 @@
             alias:  "{{ zbx_api_user }}"
             name:   Ansible Automation
             passwd: "{{ zbx_api_password }}"
-            type:   3                      # super-admin
+            type:   3                       # super-admin
             usrgrps:
-              - usrgrpid: "7"             # Zabbix administrators
+              - usrgrpid: "7"               # Zabbix administrators
           auth: "{{ admin_token }}"
           id: 5
         headers:
@@ -234,7 +234,7 @@
     - set_fact:
         api_token: "{{ api_login.json.result }}"
 
-    - name: Ensure host-group “Linux”
+    - name: Ensure host-group Linux
       uri:
         url: "{{ zbx_api_url }}"
         method: POST
@@ -248,7 +248,7 @@
           id: 7
         headers:
           Content-Type: application/json
-        status_code: [200, 412]   # 412 = already exists
+        status_code: [200, 412]     # 412 = already exists
 
     - name: Get IDs for Linux group and template
       uri:
