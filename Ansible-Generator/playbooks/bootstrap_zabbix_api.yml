@@ -1,11 +1,12 @@
 ---
 # bootstrap_zabbix_api.yml
 # ------------------------------------------------------------
-# • Writes /etc/zabbix/web/zabbix.conf.php  ❯ reloads Apache
-# • Adds a symlink /usr/share/zabbix/conf/zabbix.conf.php → same file
+# • Writes /etc/zabbix/web/zabbix.conf.php (if missing)
+# • Adds a symlink in /usr/share/zabbix/conf/ (API looks here)
+# • Flushes handlers immediately so Apache finishes reloading
 # • Changes Admin password, creates “ansible” API user
 # • Creates host-group “Linux” and registers this host
-# • Safe to re-run
+# • Idempotent – safe to re-run as many times as you like
 
 - name: Bootstrap Zabbix GUI via API
   hosts: all
@@ -13,7 +14,7 @@
   gather_facts: true
 
   #################################################################
-  # Vars coming from the installer playbook
+  # Variables (imported from the installer playbook)
   #################################################################
   vars:
     zbx_db_host:        localhost
@@ -73,9 +74,10 @@
           $IMAGE_FORMAT_DEFAULT = IMAGE_FORMAT_PNG;
           ?>
       when: not web_conf_stat.stat.exists
+      register: copy_result
       notify: reload apache2
 
-    # 0-bis ─ API looks in /usr/share/zabbix/conf, so add a symlink
+    # 0-bis ─ Place a symlink where the API expects the file
     - name: Ensure {{ zbx_share_conf_dir }} exists
       file:
         path: "{{ zbx_share_conf_dir }}"
@@ -89,16 +91,19 @@
         src:  "{{ zbx_web_conf }}"
         dest: "{{ zbx_share_conf }}"
         state: link
-        force: yes          # refresh if it pointed elsewhere
+        force: yes          # refresh if it already exists
+      register: link_result
       notify: reload apache2
+
+    # Flush handlers now so Apache is reloaded before API login
+    - meta: flush_handlers
 
     - name: Wait for Apache after (possible) reload
       wait_for:
         host: "{{ ansible_default_ipv4.address }}"
         port: 80
         timeout: 120
-      when: web_conf_stat.stat.exists is not defined or
-            web_conf_stat.stat.exists == false
+      when: copy_result is changed or link_result is changed
 
     # 1 ─ Wait until API answers
     - name: Wait until Zabbix API is reachable
@@ -204,9 +209,9 @@
             alias:  "{{ zbx_api_user }}"
             name:   Ansible Automation
             passwd: "{{ zbx_api_password }}"
-            type:   3
+            type:   3               # super-admin
             usrgrps:
-              - usrgrpid: "7"      # Zabbix administrators
+              - usrgrpid: "7"       # “Zabbix administrators”
           auth: "{{ admin_token }}"
           id: 5
         headers:
@@ -235,7 +240,7 @@
     - set_fact:
         api_token: "{{ api_login.json.result }}"
 
-    - name: Ensure host-group Linux
+    - name: Ensure host-group “Linux”
       uri:
         url: "{{ zbx_api_url }}"
         method: POST
