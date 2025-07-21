@@ -12,28 +12,28 @@
 
   tasks:
     - name: Change default Admin password
-      community.zabbix.zabbix_user:
+      zabbix.zabbix.zabbix_user:
         server_url: "{{ zbx_api_url }}"
         login_user: "{{ zbx_admin_user }}"
         login_password: "{{ zbx_admin_pass }}"
-        alias: Admin
-        passwd: "{{ zbx_admin_new_pass }}"
+        username: "{{ zbx_admin_user }}"
+        password: "{{ zbx_admin_new_pass }}"
         state: present
 
     - name: Create ansible API user
-      community.zabbix.zabbix_user:
+      zabbix.zabbix.zabbix_user:
         server_url: "{{ zbx_api_url }}"
         login_user: "{{ zbx_admin_user }}"
         login_password: "{{ zbx_admin_new_pass }}"
-        alias: "{{ zbx_api_user }}"
-        name: Ansible Automation
-        user_type: super_admin
-        usrgrps: ["Zabbix administrators"]
-        passwd: "{{ zbx_api_password }}"
+        username: "{{ zbx_api_user }}"
+        first_name: "Ansible"
+        last_name: "Automation"
+        password: "{{ zbx_api_password }}"
+        role: "Super admin role"
         state: present
 
     - name: Ensure host group Linux
-      community.zabbix.zabbix_hostgroup:
+      zabbix.zabbix.zabbix_group:
         server_url: "{{ zbx_api_url }}"
         login_user: "{{ zbx_api_user }}"
         login_password: "{{ zbx_api_password }}"
@@ -41,21 +41,22 @@
         state: present
 
     - name: Register the Zabbix server as a host
-      community.zabbix.zabbix_host:
+      zabbix.zabbix.zabbix_host:
         server_url: "{{ zbx_api_url }}"
         login_user: "{{ zbx_api_user }}"
         login_password: "{{ zbx_api_password }}"
         host_name: "{{ inventory_hostname }}"
         visible_name: "{{ inventory_hostname }}"
-        host_groups: [Linux]
+        host_groups: 
+          - Linux
         interfaces:
           - type: agent
-            main: 1
-            useip: 1
+            main: true
+            useip: true
             ip: "{{ lookup('ansible.builtin.pipe', 'hostname -I').split()[0] }}"
             dns: ""
             port: 10050
-        templates:
+        link_templates:
           - "Linux by Zabbix agent active"
         status: enabled
         state: present
