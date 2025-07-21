@@ -1,3 +1,4 @@
 collections:
   - name: community.mysql
-  - name: community.zabbix    # ← NEW – provides zabbix_group, zabbix_host, …
+  - name: community.zabbix
+    version: ">=1.0.0,<2.0.0"  
