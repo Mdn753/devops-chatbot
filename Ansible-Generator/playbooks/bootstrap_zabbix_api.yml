@@ -116,7 +116,7 @@
           jsonrpc: "2.0"
           method:  user.login
           params:
-            user:     "{{ zbx_admin_user }}"
+            username: "{{ zbx_admin_user }}"    # Changed from 'user' to 'username'
             password: "{{ zbx_admin_pass }}"
           id: 1
         headers:
@@ -161,7 +161,7 @@
           jsonrpc: "2.0"
           method:  user.login
           params:
-            user:     "{{ zbx_admin_user }}"
+            username: "{{ zbx_admin_user }}"    # Changed from 'user' to 'username'
             password: "{{ zbx_admin_new_pass }}"
           id: 3
         headers:
@@ -223,7 +223,7 @@
           jsonrpc: "2.0"
           method:  user.login
           params:
-            user:     "{{ zbx_api_user }}"
+            username: "{{ zbx_api_user }}"      # Changed from 'user' to 'username'
             password: "{{ zbx_api_password }}"
           id: 6
         headers:
