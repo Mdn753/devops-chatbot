@@ -1,29 +1,16 @@
 ---
 - name: Bootstrap Zabbix GUI via API
-  hosts: all                  # point to the server you just installed
+  hosts: all
   gather_facts: false
-  # Remove the collections section - we'll use FQCN instead
   vars:
-    ###############################################################
-    # API connection parameters
-    ###############################################################
     zbx_api_url: "http://{{ inventory_hostname }}/zabbix/api_jsonrpc.php"
-    
-    # default UI credentials (from the installer playbook)
     zbx_admin_user: "Admin"
-    zbx_admin_pass: "zabbix"              # change if you modified it
-    
-    # set a NEW password for Admin
-    zbx_admin_new_pass: admin@123
-    
-    # create a service account for future automation
+    zbx_admin_pass: "zabbix"
+    zbx_admin_new_pass: "SuperSecretAdminPW"
     zbx_api_user: "ansible"
     zbx_api_password: "admin@123"
-    
+
   tasks:
-    #################################################################
-    # 1. change default Admin password
-    #################################################################
     - name: Change default Admin password
       community.zabbix.zabbix_user:
         server_url: "{{ zbx_api_url }}"
@@ -32,11 +19,8 @@
         alias: Admin
         passwd: "{{ zbx_admin_new_pass }}"
         state: present
-        
-    #################################################################
-    # 2. create a dedicated automation account
-    #################################################################
-    - name: Create "ansible" API user
+
+    - name: Create ansible API user
       community.zabbix.zabbix_user:
         server_url: "{{ zbx_api_url }}"
         login_user: "{{ zbx_admin_user }}"
@@ -47,18 +31,15 @@
         usrgrps: ["Zabbix administrators"]
         passwd: "{{ zbx_api_password }}"
         state: present
-        
-    #################################################################
-    # subsequent tasks use the new API user
-    #################################################################
-    - name: Ensure host group "Linux"
+
+    - name: Ensure host group Linux
       community.zabbix.zabbix_hostgroup:
         server_url: "{{ zbx_api_url }}"
         login_user: "{{ zbx_api_user }}"
         login_password: "{{ zbx_api_password }}"
         name: Linux
         state: present
-        
+
     - name: Register the Zabbix server as a host
       community.zabbix.zabbix_host:
         server_url: "{{ zbx_api_url }}"
