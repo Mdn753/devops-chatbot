@@ -1,5 +1,11 @@
 ---
-
+# bootstrap_zabbix_api.yml
+# ------------------------------------------------------------
+# • Writes /etc/zabbix/web/zabbix.conf.php  ❯ reloads Apache
+# • Adds a symlink /usr/share/zabbix/conf/zabbix.conf.php → same file
+# • Changes Admin password, creates “ansible” API user
+# • Creates host-group “Linux” and registers this host
+# • Safe to re-run
 
 - name: Bootstrap Zabbix GUI via API
   hosts: all
@@ -7,38 +13,40 @@
   gather_facts: true
 
   #################################################################
-  # Variables inherited from the installer playbook
+  # Vars coming from the installer playbook
   #################################################################
   vars:
-    zbx_db_host:       localhost
-    zbx_db_name:       "{{ zabbix_db_name      | default('zabbix') }}"
-    zbx_db_user:       "{{ zabbix_db_user      | default('zabbix') }}"
-    zbx_db_password:   "{{ zabbix_db_password  | default('StrongDBpass!') }}"
+    zbx_db_host:        localhost
+    zbx_db_name:        "{{ zabbix_db_name      | default('zabbix') }}"
+    zbx_db_user:        "{{ zabbix_db_user      | default('zabbix') }}"
+    zbx_db_password:    "{{ zabbix_db_password  | default('StrongDBpass!') }}"
 
-    zbx_api_url:       "http://{{ ansible_default_ipv4.address }}/zabbix/api_jsonrpc.php"
+    zbx_api_url:        "http://{{ ansible_default_ipv4.address }}/zabbix/api_jsonrpc.php"
 
-    zbx_admin_user:    Admin
-    zbx_admin_pass:    "{{ zabbix_admin_password | default('zabbix') }}"
+    zbx_admin_user:     Admin
+    zbx_admin_pass:     "{{ zabbix_admin_password | default('zabbix') }}"
     zbx_admin_new_pass: admin@123
 
-    zbx_api_user:      ansible
-    zbx_api_password:  admin@123
+    zbx_api_user:       ansible
+    zbx_api_password:   admin@123
 
-    zbx_web_conf_dir:  /etc/zabbix/web
-    zbx_web_conf:      "{{ zbx_web_conf_dir }}/zabbix.conf.php"
+    zbx_web_conf_dir:   /etc/zabbix/web
+    zbx_web_conf:       "{{ zbx_web_conf_dir }}/zabbix.conf.php"
+    zbx_share_conf_dir: /usr/share/zabbix/conf
+    zbx_share_conf:     "{{ zbx_share_conf_dir }}/zabbix.conf.php"
 
   #################################################################
   # TASKS
   #################################################################
   tasks:
-    # 0 ─ Ensure front-end config exists
+    # 0 ─ Ensure main config file exists
     - name: Ensure {{ zbx_web_conf_dir }} exists
       file:
-        path:  "{{ zbx_web_conf_dir }}"
+        path: "{{ zbx_web_conf_dir }}"
         state: directory
         owner: www-data
         group: www-data
-        mode:  "0755"
+        mode: "0755"
 
     - name: Check if front-end config already exists
       stat:
@@ -67,12 +75,30 @@
       when: not web_conf_stat.stat.exists
       notify: reload apache2
 
-    - name: Wait for Apache after reload
+    # 0-bis ─ API looks in /usr/share/zabbix/conf, so add a symlink
+    - name: Ensure {{ zbx_share_conf_dir }} exists
+      file:
+        path: "{{ zbx_share_conf_dir }}"
+        state: directory
+        owner: www-data
+        group: www-data
+        mode: "0755"
+
+    - name: Link config into /usr/share/zabbix/conf
+      file:
+        src:  "{{ zbx_web_conf }}"
+        dest: "{{ zbx_share_conf }}"
+        state: link
+        force: yes          # refresh if it pointed elsewhere
+      notify: reload apache2
+
+    - name: Wait for Apache after (possible) reload
       wait_for:
         host: "{{ ansible_default_ipv4.address }}"
         port: 80
         timeout: 120
-      when: not web_conf_stat.stat.exists
+      when: web_conf_stat.stat.exists is not defined or
+            web_conf_stat.stat.exists == false
 
     # 1 ─ Wait until API answers
     - name: Wait until Zabbix API is reachable
@@ -180,7 +206,7 @@
             passwd: "{{ zbx_api_password }}"
             type:   3
             usrgrps:
-              - usrgrpid: "7"   # Zabbix administrators
+              - usrgrpid: "7"      # Zabbix administrators
           auth: "{{ admin_token }}"
           id: 5
         headers:
@@ -188,7 +214,7 @@
         status_code: 200
       when: api_user_lookup.json.result | length == 0
 
-    # 5 ─ Log in as ansible; create group & host
+    # 5 ─ Login as ansible; create group & host
     - name: Login as ansible
       uri:
         url: "{{ zbx_api_url }}"
@@ -237,11 +263,11 @@
             - method: hostgroup.get
               params:
                 filter:
-                  name: [ "Linux" ]
+                  name: ["Linux"]
             - method: template.get
               params:
                 filter:
-                  name: [ "Linux by Zabbix agent active" ]
+                  name: ["Linux by Zabbix agent active"]
           auth: "{{ api_token }}"
         headers:
           Content-Type: application/json
@@ -291,8 +317,8 @@
 #################################################################
 # HANDLERS
 #################################################################
-  handlers:
-    - name: reload apache2
-      service:
-        name: apache2
-        state: reloaded
+handlers:
+  - name: reload apache2
+    service:
+      name: apache2
+      state: reloaded
