@@ -1,5 +1,5 @@
 ---
-# bootstrap_zabbix_api.yml - AWX Compatible Version
+# bootstrap_zabbix_api.yml - AWX Compatible Version (FIXED)
 # ------------------------------------------------------------
 # Idempotently configures the Zabbix GUI:
 #   • /etc/zabbix/zabbix.conf.php         (main location)
@@ -9,6 +9,7 @@
 #   • Creates host-group Linux & registers this host
 # 
 # AWX/Tower Compatible: Handles container execution environment
+# FIXES: Duplicate user handling, authentication issues, improved error handling
 
 - name: Bootstrap Zabbix GUI via API
   hosts: all
@@ -203,8 +204,8 @@
       when: admin_login.json.result is not defined
       tags: api
 
-    # 3 ─ Ensure "ansible" API user exists (robust handling)
-    - name: Look up existing ansible user
+    # 3 ─ Clean up and ensure "ansible" API user exists (FIXED - handles duplicates)
+    - name: Look up ALL existing ansible users
       uri:
         url: "{{ zbx_api_url }}"
         method: POST
@@ -215,7 +216,7 @@
           params:
             filter:
               alias: "{{ zbx_api_user }}"
-            output: ["userid", "alias", "name", "type"]
+            output: ["userid", "alias", "name", "type", "attempt_failed", "attempt_clock"]
           auth: "{{ admin_token }}"
           id: 2
         headers:
@@ -225,37 +226,41 @@
       register: api_user_lookup
       tags: user
 
-    - name: Debug existing user lookup
+    - name: Debug existing user lookup (detailed)
       debug:
-        msg: "Found {{ api_user_lookup.json.result | length }} user(s) with alias '{{ zbx_api_user }}'"
+        msg: 
+          - "Found {{ api_user_lookup.json.result | length }} user(s) with alias '{{ zbx_api_user }}'"
+          - "User details: {{ api_user_lookup.json.result }}"
       tags: user
 
-    # Strategy: Always ensure the user has the correct password
-    - name: Update existing ansible user password and permissions
+    # Delete ALL existing ansible users to clean up duplicates
+    - name: Delete existing ansible users (cleanup duplicates)
       uri:
         url: "{{ zbx_api_url }}"
         method: POST
         body_format: json
         body:
           jsonrpc: "2.0"
-          method:  user.update
-          params:
-            userid: "{{ api_user_lookup.json.result[0].userid }}"
-            passwd: "{{ zbx_api_password }}"
-            type: 3  # super-admin
-            usrgrps:
-              - usrgrpid: "7"  # Zabbix administrators
+          method:  user.delete
+          params: "{{ api_user_lookup.json.result | map(attribute='userid') | list }}"
           auth: "{{ admin_token }}"
-          id: 2.5
+          id: 2.1
         headers:
           Content-Type: application/json-rpc
         status_code: 200
         timeout: 30
       when: api_user_lookup.json.result | length > 0
-      register: user_update_result
+      register: user_delete_result
       tags: user
 
-    - name: Create new ansible super-admin user
+    - name: Wait after user deletion
+      pause:
+        seconds: 5
+      when: user_delete_result.changed
+      tags: user
+
+    # Always create a fresh ansible user
+    - name: Create fresh ansible super-admin user
       uri:
         url: "{{ zbx_api_url }}"
         method: POST
@@ -276,19 +281,31 @@
           Content-Type: application/json-rpc
         status_code: 200
         timeout: 30
-      when: api_user_lookup.json.result | length == 0
       register: user_create_result
       tags: user
 
-    # Give the system time to propagate user changes
-    - name: Wait for user changes to propagate
-      pause:
-        seconds: 3
-      when: user_update_result.changed or user_create_result.changed
+    - name: Debug user creation result
+      debug:
+        var: user_create_result.json
+      when: user_create_result is defined
       tags: user
 
-    # 4 ─ Login as ansible with retry logic
-    - name: Login as ansible user (with retries)
+    - name: Check for user creation errors
+      fail:
+        msg: "Failed to create ansible user - API Error: {{ user_create_result.json.error | to_nice_json }}"
+      when: 
+        - user_create_result.json is defined
+        - user_create_result.json.error is defined
+      tags: user
+
+    # Wait longer for user propagation
+    - name: Wait for user changes to propagate
+      pause:
+        seconds: 10
+      tags: user
+
+    # 4 ─ Login as ansible with improved retry logic
+    - name: Verify new user can login (with extended retries)
       uri:
         url: "{{ zbx_api_url }}"
         method: POST
@@ -305,9 +322,9 @@
         status_code: 200
         timeout: 30
       register: api_login
-      retries: 5
-      delay: 3
-      until: api_login.json.result is defined
+      retries: 10
+      delay: 5
+      until: api_login.json.result is defined and api_login.json.error is not defined
       tags: user
 
     - name: Debug ansible user login response
@@ -549,7 +566,7 @@
           - "=== Zabbix Bootstrap Complete ==="
           - "✓ Configuration files created and linked"
           - "✓ Admin user accessible with default credentials"
-          - "✓ API user '{{ zbx_api_user }}' created/updated"
+          - "✓ API user '{{ zbx_api_user }}' created/updated (duplicates cleaned)"
           - "✓ Linux host group ensured"
           - "✓ Host '{{ inventory_hostname }}' registered with monitoring"
           - ""
@@ -563,6 +580,7 @@
           - "  1. Change default Admin password via web interface"
           - "  2. Configure additional monitoring templates as needed"
           - "  3. Set up notification channels (email, Slack, etc.)"
+          - "  4. Install and configure Zabbix agent on monitored hosts"
       tags: always
 
 #################################################################
