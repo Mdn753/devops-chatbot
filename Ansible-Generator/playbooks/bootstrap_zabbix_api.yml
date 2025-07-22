@@ -31,7 +31,7 @@
     zbx_admin_pass:     "{{ zabbix_admin_password | default('zabbix') }}"
 
     zbx_api_user:       ansible
-    zbx_api_password:   "{{ zabbix_api_password  | default('admin@123') }}"
+    zbx_api_password:   "{{ zabbix_api_password  | default('Admin@1234') }}"
 
     # main config file & helper symlink
     zbx_etc_conf:       /etc/zabbix/zabbix.conf.php
