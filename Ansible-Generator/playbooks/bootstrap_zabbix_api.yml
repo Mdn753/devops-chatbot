@@ -310,16 +310,14 @@
       body:
         jsonrpc: "2.0"
         method:  hostgroup.create
-        params:
-          name: Linux
+        params: { name: Linux }
         auth: "{{ api_token }}"
         id: 5
-      headers:
-        Content-Type: application/json-rpc
+      headers: { Content-Type: application/json-rpc }
       status_code: [200, 412]
     tags: infrastructure
 
-  - name: Get IDs for group & template
+  - name: Get IDs for group & template via batch
     uri:
       url: "{{ zbx_api_url }}"
       method: POST
@@ -338,14 +336,31 @@
               output: ["templateid"]
         auth: "{{ api_token }}"
         id: 6
-      headers:
-        Content-Type: application/json-rpc
+      headers: { Content-Type: application/json-rpc }
     register: batch_ids
     tags: infrastructure
 
-  - set_fact:
-      linux_groupid: "{{ batch_ids.json[0].result[0].groupid }}"
-      linux_tmplid:  "{{ batch_ids.json[1].result[0].templateid }}"
+  - name: Fail if batch call returned an error
+    fail:
+      msg: "Batch request failed – {{ batch_ids.json.error | to_nice_json }}"
+    when: batch_ids.json.error is defined
+    tags: infrastructure
+
+  - name: Ensure group & template were found
+    fail:
+      msg: >
+        Cannot find {{ 'host-group' if (batch_ids.json.result[0].result | length == 0) else 'template' }}.
+        Group result: {{ batch_ids.json.result[0].result }}
+        Template result: {{ batch_ids.json.result[1].result }}
+    when: >
+      batch_ids.json.result[0].result | length == 0 or
+      batch_ids.json.result[1].result | length == 0
+    tags: infrastructure
+
+  - name: Save groupid & templateid facts
+    set_fact:
+      linux_groupid: "{{ batch_ids.json.result[0].result[0].groupid }}"
+      linux_tmplid:  "{{ batch_ids.json.result[1].result[0].templateid }}"
     tags: infrastructure
 
   #################################################################
