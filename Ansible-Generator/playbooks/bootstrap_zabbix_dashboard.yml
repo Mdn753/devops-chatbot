@@ -1,192 +1,280 @@
 ---
-# bootstrap_zabbix_dashboard.yml
-# --------------------------------------------------------------
-# Creates (or idempotently updates) a Zabbix dashboard named
-#   “Linux Overview” with a handful of useful widgets.
+# auto_dashboard.yml
+# ---------------------------------------------------------------
+# What it does
+#   1. Logs in with the “ansible” API user
+#   2. Finds the host you name (host.get  → hostid)
+#   3. Finds the item that matches a key you name (item.get → itemid)
+#   4. (Optional) ensures a classic graph exists that combines
+#      several items and returns graphid (graph.get / graph.create)
+#   5. Creates or updates a dashboard that shows:
+#        • a simple graph of the chosen item
+#        • a classic graph (if you asked for one)
 #
-# Requirements
-#   • Your “ansible” API user already exists (previous playbook)
-#   • Zabbix ≥ 6.0
-#
-# Tips
-#   • Replace hostids / itemids / graphids with real ones that
-#     exist in your environment.
-#   • Widget coordinates are a simple grid: x,y start at 0,0.
-#     Width / height are in 32-pixel “units”.
+# Variables you normally set at runtime with -e or an AWX Survey:
+#   target_host        : hostname inside Zabbix  (e.g. srv-01)
+#   cpu_item_key       : key_ of the metric you care about
+#                        (default 1-min load on Linux template)
+#   build_filesys_graph: true/false  (create pie chart example)
 
-- name: Provision Zabbix dashboard
-  hosts: all          # run once from the Zabbix server or a jumphost
-  gather_facts: true
+- name: Build dashboard entirely via API
+  hosts: localhost
+  connection: local
+  gather_facts: true               # we reuse ansible_default_ipv4.address
+
   vars:
-    # --- Zabbix connection -------------------------------------
-    zbx_api_url:      "http://{{ ansible_default_ipv4.address }}/zabbix/api_jsonrpc.php"
-    zbx_api_user:     ansible
-    zbx_api_password: "{{ zabbix_api_password | default('Admin@1234') }}"
+    # ------------------------------------------------------------------
+    # Zabbix connection (edit only zbx_api_password in practice)
+    # ------------------------------------------------------------------
+    zbx_api_url:       "http://{{ ansible_default_ipv4.address }}/zabbix/api_jsonrpc.php"
+    zbx_api_user:      ansible
+    zbx_api_password:  "{{ zabbix_api_password | default('Admin@1234') }}"
 
-    # --- Dashboard settings ------------------------------------
-    dashboard_name:   "Linux Overview"
-    dashboard_display_period: 900       # 15 min
-    dashboard_auto_start: 1             # load at login for the user
+    # ------------------------------------------------------------------
+    # Things YOU pass in (or accept the defaults)
+    # ------------------------------------------------------------------
+    target_host:        "{{ host_name | default('srv-01') }}"
+    cpu_item_key:       "{{ item_key  | default('system.cpu.load[percpu,avg1]') }}"
+    build_filesys_graph: "{{ graph_fs | default(False) | bool }}"
 
-    # Widgets (example set – tweak IDs to match your environment)
-    # Docs: https://www.zabbix.com/documentation/current/en/manual/api/reference/dashboard/widget
-    dashboard_widgets:
-      # Problems widget – live issues
-      - type: problems
-        name: "Current Problems"
-        x: 0
-        y: 0
-        width: 12
-        height: 6
-        fields:
-          - type: 1                # Host group filter
-            name: groupIds
-            value: []
-          - type: 4                # Sort order
-            name: sortTriggers
-            value: "1"
-      # Simple graph of CPU load (use an existing itemid)
-      - type: graph
-        name: "CPU Load"
-        x: 12
-        y: 0
-        width: 12
-        height: 6
-        fields:
-          - type: 1
-            name: itemid
-            value: "12345"         # <-- replace with real itemid
-      # Pie chart of disk space (graphid example)
-      - type: graph
-        name: "Filesystem / Usage"
-        x: 0
-        y: 6
-        width: 12
-        height: 6
-        fields:
-          - type: 2
-            name: graphid
-            value: "67890"         # <-- replace with real graphid
-      # Host availability
-      - type: host_availability
-        name: "Host Availability"
-        x: 12
-        y: 6
-        width: 12
-        height: 6
-        fields:
-          - type: 1
-            name: hostIds
-            value: []              # empty → all hosts
+    # Dashboard meta
+    dashboard_name:     "Auto Dashboard for {{ target_host }}"
+    dashboard_period:   900
+    dashboard_auto:     0
 
   tasks:
-    # 1) Login as ansible
-    - name: Login to Zabbix API
-      uri:
-        url: "{{ zbx_api_url }}"
-        method: POST
-        body_format: json
-        body:
-          jsonrpc: "2.0"
-          method:  user.login
-          params:
-            username: "{{ zbx_api_user }}"
-            password: "{{ zbx_api_password }}"
-          id: 1
-        headers:
-          Content-Type: application/json-rpc
-      register: zbx_login
-      failed_when: zbx_login.json.error is defined
+  # 1 ─ Login
+  - name: Login to Zabbix API
+    uri:
+      url: "{{ zbx_api_url }}"
+      method: POST
+      body_format: json
+      body:
+        jsonrpc: "2.0"
+        method:  user.login
+        params:
+          username: "{{ zbx_api_user }}"
+          password: "{{ zbx_api_password }}"
+        id: 1
+      headers:
+        Content-Type: application/json-rpc
+    register: login
+    failed_when: login.json.error is defined
 
-    - set_fact:
-        zbx_token: "{{ zbx_login.json.result }}"
+  - set_fact:
+      zbx_token: "{{ login.json.result }}"
 
-    # 2) Does the dashboard already exist?
-    - name: Query existing dashboard
-      uri:
-        url: "{{ zbx_api_url }}"
-        method: POST
-        body_format: json
-        body:
-          jsonrpc: "2.0"
-          method:  dashboard.get
-          params:
-            filter:
-              name:
-                - "{{ dashboard_name }}"
-            output: ["dashboardid"]
-          auth: "{{ zbx_token }}"
-          id: 2
-        headers:
-          Content-Type: application/json-rpc
-      register: existing_dash
+  # 2 ─ hostid
+  - name: Get hostid for {{ target_host }}
+    uri:
+      url: "{{ zbx_api_url }}"
+      method: POST
+      body_format: json
+      body:
+        jsonrpc: "2.0"
+        method:  host.get
+        params:
+          filter:
+            host:
+              - "{{ target_host }}"
+          output:
+            - hostid
+        auth: "{{ zbx_token }}"
+        id: 2
+      headers:
+        Content-Type: application/json-rpc
+    register: host_info
 
-    - set_fact:
-        dashboard_id: "{{ existing_dash.json.result[0].dashboardid | default(omit) }}"
+  - fail:
+      msg: "Host {{ target_host }} not found in Zabbix."
+    when: host_info.json.result | length == 0
 
-    # 3) Build “widgets” structure expected by API
-    - name: Assemble widget list
-      set_fact:
-        widgets_payload: >-
-          {{
-            dashboard_widgets
-            | map('combine',
-                {'fields':
-                  item.fields | default([]) |
-                  map('combine', {'type': item.type | default(0)}) | list
-                }
-              )
-            | list
-          }}
+  - set_fact:
+      host_id: "{{ host_info.json.result[0].hostid }}"
 
-    # 4) Create or update dashboard
-    - name: Create new dashboard
-      when: dashboard_id is not defined
-      uri:
-        url: "{{ zbx_api_url }}"
-        method: POST
-        body_format: json
-        body:
-          jsonrpc: "2.0"
-          method:  dashboard.create
-          params:
-            name: "{{ dashboard_name }}"
-            display_period: "{{ dashboard_display_period }}"
-            auto_start: "{{ dashboard_auto_start }}"
-            widgets: "{{ widgets_payload }}"
-          auth: "{{ zbx_token }}"
-          id: 3
-        headers:
-          Content-Type: application/json-rpc
-      register: dash_create
-      failed_when: dash_create.json.error is defined
+  # 3 ─ itemid (search by key_)
+  - name: Get itemid for {{ cpu_item_key }}
+    uri:
+      url: "{{ zbx_api_url }}"
+      method: POST
+      body_format: json
+      body:
+        jsonrpc: "2.0"
+        method:  item.get
+        params:
+          hostids:
+            - "{{ host_id }}"
+          search:
+            key_: "{{ cpu_item_key }}"
+          output:
+            - itemid
+        auth: "{{ zbx_token }}"
+        id: 3
+      headers:
+        Content-Type: application/json-rpc
+    register: item_info
 
-    - name: Update existing dashboard
-      when: dashboard_id is defined
-      uri:
-        url: "{{ zbx_api_url }}"
-        method: POST
-        body_format: json
-        body:
-          jsonrpc: "2.0"
-          method:  dashboard.update
-          params:
-            dashboardid: "{{ dashboard_id }}"
-            name: "{{ dashboard_name }}"
-            display_period: "{{ dashboard_display_period }}"
-            auto_start: "{{ dashboard_auto_start }}"
-            widgets: "{{ widgets_payload }}"
-          auth: "{{ zbx_token }}"
-          id: 4
-        headers:
-          Content-Type: application/json-rpc
-      register: dash_update
-      failed_when: dash_update.json.error is defined
+  - fail:
+      msg: "Item with key {{ cpu_item_key }} not found on host {{ target_host }}."
+    when: item_info.json.result | length == 0
 
-    # 5) Success message
-    - name: Summary
-      debug:
-        msg: >-
-          Dashboard '{{ dashboard_name }}'
-          {{ 'created' if dashboard_id is not defined else 'updated' }}
-          successfully.
+  - set_fact:
+      cpu_itemid: "{{ item_info.json.result[0].itemid }}"
+
+  # 4 ─ (Optional) make classic filesystem graph
+  - name: Ensure classic graph for FS usage (graphid fact)
+    when: build_filesys_graph
+    block:
+      # 4a check existing
+      - name: Search existing FS graph
+        uri:
+          url: "{{ zbx_api_url }}"
+          method: POST
+          body_format: json
+          body:
+            jsonrpc: "2.0"
+            method:  graph.get
+            params:
+              hostids:
+                - "{{ host_id }}"
+              search:
+                name: "Filesystem usage (%)"
+              output:
+                - graphid
+            auth: "{{ zbx_token }}"
+            id: 4a
+          headers:
+            Content-Type: application/json-rpc
+        register: fs_graph
+
+      # 4b create if missing (Example: pie chart across all mountpoints)
+      - name: Create FS graph if absent
+        when: fs_graph.json.result | length == 0
+        uri:
+          url: "{{ zbx_api_url }}"
+          method: POST
+          body_format: json
+          body:
+            jsonrpc: "2.0"
+            method:  graph.create
+            params:
+              name: "Filesystem usage (%)"
+              width: 900
+              height: 300
+              gtype: 2                  # pie
+              items:
+                - itemid: "{{ cpu_itemid }}"  # Example; swap with real fs itemids
+                  color: "00AA00"
+            auth: "{{ zbx_token }}"
+            id: 4b
+          headers:
+            Content-Type: application/json-rpc
+        register: fs_graph_created
+        failed_when: fs_graph_created.json.error is defined
+
+      - set_fact:
+          fs_graphid: >-
+            {{
+              (fs_graph.json.result[0].graphid
+                if fs_graph.json.result | length > 0
+                else fs_graph_created.json.result.graphids[0])
+            }}
+
+  # 5 ─ Prepare widgets list
+  - set_fact:
+      widgets:
+        - type: graph
+          name: "CPU load 1-min"
+          x: 0
+          y: 0
+          width: 12
+          height: 6
+          fields:
+            - type: 1
+              name: itemid
+              value: "{{ cpu_itemid }}"
+        - type: problems
+          name: "Current Problems"
+          x: 12
+          y: 0
+          width: 12
+          height: 6
+          fields: []
+  - set_fact:
+      widgets: "{{ widgets + [ {
+        'type': 'graph',
+        'name': 'Filesystem usage %',
+        'x': 0,
+        'y': 6,
+        'width': 24,
+        'height': 6,
+        'fields': [ { 'type': 2, 'name': 'graphid', 'value': fs_graphid } ] } ] }}"
+    when: build_filesys_graph
+
+  # 6 ─ Dashboard upsert
+  - name: Lookup dashboard
+    uri:
+      url: "{{ zbx_api_url }}"
+      method: POST
+      body_format: json
+      body:
+        jsonrpc: "2.0"
+        method:  dashboard.get
+        params:
+          filter:
+            name:
+              - "{{ dashboard_name }}"
+          output:
+            - dashboardid
+        auth: "{{ zbx_token }}"
+        id: 6
+      headers:
+        Content-Type: application/json-rpc
+    register: db_lookup
+
+  - name: Create dashboard
+    when: db_lookup.json.result | length == 0
+    uri:
+      url: "{{ zbx_api_url }}"
+      method: POST
+      body_format: json
+      body:
+        jsonrpc: "2.0"
+        method:  dashboard.create
+        params:
+          name: "{{ dashboard_name }}"
+          display_period: "{{ dashboard_period }}"
+          auto_start: "{{ dashboard_auto }}"
+          widgets: "{{ widgets }}"
+        auth: "{{ zbx_token }}"
+        id: 6.1
+      headers:
+        Content-Type: application/json-rpc
+    register: db_created
+    failed_when: db_created.json.error is defined
+
+  - name: Update dashboard
+    when: db_lookup.json.result | length > 0
+    uri:
+      url: "{{ zbx_api_url }}"
+      method: POST
+      body_format: json
+      body:
+        jsonrpc: "2.0"
+        method:  dashboard.update
+        params:
+          dashboardid: "{{ db_lookup.json.result[0].dashboardid }}"
+          name: "{{ dashboard_name }}"
+          display_period: "{{ dashboard_period }}"
+          auto_start: "{{ dashboard_auto }}"
+          widgets: "{{ widgets }}"
+        auth: "{{ zbx_token }}"
+        id: 6.2
+      headers:
+        Content-Type: application/json-rpc
+    failed_when: db_result.json.error is defined
+    register: db_result
+
+  # 7 ─ Done
+  - debug:
+      msg: "Dashboard '{{ dashboard_name }}' deployed without GUI access."
