@@ -1,0 +1,25 @@
+---
+- name: Install & configure Zabbix agent
+  hosts: "{{ vm_name }}"
+  become: true
+
+  vars:
+    zbx_server_ip: "{{ zbx_server_ip }}"
+
+  tasks:
+    - name: Install package
+      package:
+        name: zabbix-agent
+        state: present
+
+    - name: Configure active server
+      lineinfile:
+        path: /etc/zabbix/zabbix_agentd.conf
+        regexp: '^ServerActive='
+        line: "ServerActive={{ zbx_server_ip }}"
+
+    - name: Enable & start service
+      service:
+        name: zabbix-agent
+        state: started
+        enabled: yes

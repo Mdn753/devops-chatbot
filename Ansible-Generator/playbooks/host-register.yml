@@ -1,0 +1,259 @@
+---
+# host-register.yml
+# ------------------------------------------------------------------
+# Registers (or idempotently updates) a VM in Zabbix **via the API**.
+#
+# Expected to be launched from AWX / Ansible Tower with *connection: local*.
+# All interaction is JSON-RPC; no GUI required.
+#
+# Required extra-vars (pass in the Job Template, Survey, or n8n call)
+# ───────────────────────────────────────────────────────────────────
+#   zbx_api_url        : "http://<zabbix-ip>/zabbix/api_jsonrpc.php"
+#   zbx_api_password   : ansible-API-user password
+#   vm_name            : host name inside Zabbix (string)
+#   vm_ip              : primary IP address of the VM
+#
+# Optional (defaults shown)
+# ─────────────────────────
+#   zbx_api_user       : ansible
+#   host_group         : Linux
+#   template_name      : Linux by Zabbix agent active
+#
+# Playbook flow
+# ─────────────
+#   1. Login  → get auth token
+#   2. Ensure host-group exists  → groupid
+#   3. Lookup template           → templateid   (fail if missing)
+#   4. host.get (does it exist?)
+#   5. host.create  or  host.update with IP, group, template
+#   6. Print summary
+
+- name: Register VM in Zabbix via API
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    # ---------- Zabbix connection ----------
+    zbx_api_url:      "{{ zbx_api_url | default(omit) }}"
+    zbx_api_user:     "{{ zbx_api_user | default('ansible') }}"
+    zbx_api_password: "{{ zbx_api_password | default(omit) }}"
+
+    # ---------- Host specifics -------------
+    vm_name:          "{{ vm_name | default(omit) }}"
+    vm_ip:            "{{ vm_ip   | default(omit) }}"
+
+    # ---------- Inventory defaults ---------
+    host_group:    "{{ host_group    | default('Linux') }}"
+    template_name: "{{ template_name | default('Linux by Zabbix agent active') }}"
+
+  tasks:
+    # ─────────────────────────────────────────────────────────────
+    # 0. Mandatory-var sanity check
+    # ─────────────────────────────────────────────────────────────
+    - name: Fail if required vars are missing
+      fail:
+        msg: |
+          Missing required variables. Provide:
+            • zbx_api_url
+            • zbx_api_password
+            • vm_name
+            • vm_ip
+      when: >
+        zbx_api_url is undefined or
+        zbx_api_password is undefined or
+        vm_name is undefined or
+        vm_ip is undefined
+
+    # ─────────────────────────────────────────────────────────────
+    # 1. Login
+    # ─────────────────────────────────────────────────────────────
+    - name: Login to Zabbix API
+      uri:
+        url: "{{ zbx_api_url }}"
+        method: POST
+        body_format: json
+        body:
+          jsonrpc: "2.0"
+          method:  user.login
+          params:
+            username: "{{ zbx_api_user }}"
+            password: "{{ zbx_api_password }}"
+          id: 1
+        headers:
+          Content-Type: application/json-rpc
+      register: login_rsp
+      failed_when: login_rsp.json.error is defined
+
+    - set_fact:
+        zbx_token: "{{ login_rsp.json.result }}"
+
+    # ─────────────────────────────────────────────────────────────
+    # 2. Ensure host-group exists ➜ groupid
+    # ─────────────────────────────────────────────────────────────
+    - name: Create host-group {{ host_group }} if missing
+      uri:
+        url: "{{ zbx_api_url }}"
+        method: POST
+        body_format: json
+        body:
+          jsonrpc: "2.0"
+          method:  hostgroup.create
+          params:
+            name: "{{ host_group }}"
+          auth: "{{ zbx_token }}"
+          id: 2
+        headers:
+          Content-Type: application/json-rpc
+      register: grp_create
+      status_code: [200, 412]   # 412 = already exists
+
+    - name: Get groupid
+      uri:
+        url: "{{ zbx_api_url }}"
+        method: POST
+        body_format: json
+        body:
+          jsonrpc: "2.0"
+          method:  hostgroup.get
+          params:
+            filter:
+              name: [ "{{ host_group }}" ]
+            output: [ "groupid" ]
+          auth: "{{ zbx_token }}"
+          id: 2.1
+        headers:
+          Content-Type: application/json-rpc
+      register: grp_get
+
+    - set_fact:
+        group_id: "{{ grp_get.json.result[0].groupid }}"
+
+    # ─────────────────────────────────────────────────────────────
+    # 3. Get templateid (fail if template missing)
+    # ─────────────────────────────────────────────────────────────
+    - name: Get templateid for {{ template_name }}
+      uri:
+        url: "{{ zbx_api_url }}"
+        method: POST
+        body_format: json
+        body:
+          jsonrpc: "2.0"
+          method:  template.get
+          params:
+            filter:
+              name: [ "{{ template_name }}" ]
+            output: [ "templateid" ]
+          auth: "{{ zbx_token }}"
+          id: 3
+        headers:
+          Content-Type: application/json-rpc
+      register: tmpl_get
+
+    - fail:
+        msg: "Template '{{ template_name }}' not found in Zabbix."
+      when: tmpl_get.json.result | length == 0
+
+    - set_fact:
+        template_id: "{{ tmpl_get.json.result[0].templateid }}"
+
+    # ─────────────────────────────────────────────────────────────
+    # 4. Does host already exist?
+    # ─────────────────────────────────────────────────────────────
+    - name: host.get for {{ vm_name }}
+      uri:
+        url: "{{ zbx_api_url }}"
+        method: POST
+        body_format: json
+        body:
+          jsonrpc: "2.0"
+          method:  host.get
+          params:
+            filter:
+              host: [ "{{ vm_name }}" ]
+            output: [ "hostid" ]
+          auth: "{{ zbx_token }}"
+          id: 4
+        headers:
+          Content-Type: application/json-rpc
+      register: host_lookup
+
+    - set_fact:
+        existing_hostid: "{{ host_lookup.json.result[0].hostid }}"
+      when: host_lookup.json.result | length > 0
+
+    # ─────────────────────────────────────────────────────────────
+    # 5A. Create new host
+    # ─────────────────────────────────────────────────────────────
+    - name: Create host {{ vm_name }}
+      when: existing_hostid is undefined
+      uri:
+        url: "{{ zbx_api_url }}"
+        method: POST
+        body_format: json
+        body:
+          jsonrpc: "2.0"
+          method:  host.create
+          params:
+            host: "{{ vm_name }}"
+            name: "{{ vm_name }}"
+            interfaces:
+              - type: 1
+                main: 1
+                useip: 1
+                ip: "{{ vm_ip }}"
+                dns: ""
+                port: "10050"
+            groups:
+              - groupid: "{{ group_id }}"
+            templates:
+              - templateid: "{{ template_id }}"
+            description: "Auto-registered by AWX"
+          auth: "{{ zbx_token }}"
+          id: 5c
+        headers:
+          Content-Type: application/json-rpc
+      register: host_create
+      failed_when: host_create.json.error is defined
+
+    # ─────────────────────────────────────────────────────────────
+    # 5B. Update existing host
+    # ─────────────────────────────────────────────────────────────
+    - name: Update host {{ vm_name }}
+      when: existing_hostid is defined
+      uri:
+        url: "{{ zbx_api_url }}"
+        method: POST
+        body_format: json
+        body:
+          jsonrpc: "2.0"
+          method:  host.update
+          params:
+            hostid: "{{ existing_hostid }}"
+            name: "{{ vm_name }}"
+            interfaces:
+              - type: 1
+                main: 1
+                useip: 1
+                ip: "{{ vm_ip }}"
+                dns: ""
+                port: "10050"
+            groups:
+              - groupid: "{{ group_id }}"
+            templates:
+              - templateid: "{{ template_id }}"
+          auth: "{{ zbx_token }}"
+          id: 5u
+        headers:
+          Content-Type: application/json-rpc
+      register: host_update
+      failed_when: host_update.json.error is defined
+
+    # ─────────────────────────────────────────────────────────────
+    # 6. Summary
+    # ─────────────────────────────────────────────────────────────
+    - name: Registration summary
+      debug:
+        msg: >
+          Host '{{ vm_name }}' {{ 'created' if existing_hostid is undefined else 'updated' }}
+          in group '{{ host_group }}' with template '{{ template_name }}'.
