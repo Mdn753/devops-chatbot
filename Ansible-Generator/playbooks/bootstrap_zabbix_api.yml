@@ -273,7 +273,7 @@
         params:
           username: "{{ zbx_api_user }}"        # <─ NEW field
           name:     "Ansible Automation (AWX)"
-          password: "{{ zbx_api_password }}"    # <─ NEW field
+          passwd: "{{ zbx_api_password }}"    # <─ NEW field
           type:     3                           # super-admin
           usrgrps:
             - usrgrpid: "7"                     # Zabbix administrators
