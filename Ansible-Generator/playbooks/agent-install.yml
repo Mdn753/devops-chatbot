@@ -1,6 +1,6 @@
 ---
 - name: Install & configure Zabbix agent
-  hosts: "{{ vm_name }}"
+  hosts: all            # ← static
   become: true
 
   vars:
@@ -23,3 +23,4 @@
         name: zabbix-agent
         state: started
         enabled: yes
+
