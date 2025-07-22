@@ -1,0 +1,192 @@
+---
+# bootstrap_zabbix_dashboard.yml
+# --------------------------------------------------------------
+# Creates (or idempotently updates) a Zabbix dashboard named
+#   “Linux Overview” with a handful of useful widgets.
+#
+# Requirements
+#   • Your “ansible” API user already exists (previous playbook)
+#   • Zabbix ≥ 6.0
+#
+# Tips
+#   • Replace hostids / itemids / graphids with real ones that
+#     exist in your environment.
+#   • Widget coordinates are a simple grid: x,y start at 0,0.
+#     Width / height are in 32-pixel “units”.
+
+- name: Provision Zabbix dashboard
+  hosts: all          # run once from the Zabbix server or a jumphost
+  gather_facts: false
+  vars:
+    # --- Zabbix connection -------------------------------------
+    zbx_api_url:      "http://{{ ansible_default_ipv4.address }}/zabbix/api_jsonrpc.php"
+    zbx_api_user:     ansible
+    zbx_api_password: "{{ zabbix_api_password | default('Admin@1234') }}"
+
+    # --- Dashboard settings ------------------------------------
+    dashboard_name:   "Linux Overview"
+    dashboard_display_period: 900       # 15 min
+    dashboard_auto_start: 1             # load at login for the user
+
+    # Widgets (example set – tweak IDs to match your environment)
+    # Docs: https://www.zabbix.com/documentation/current/en/manual/api/reference/dashboard/widget
+    dashboard_widgets:
+      # Problems widget – live issues
+      - type: problems
+        name: "Current Problems"
+        x: 0
+        y: 0
+        width: 12
+        height: 6
+        fields:
+          - type: 1                # Host group filter
+            name: groupIds
+            value: []
+          - type: 4                # Sort order
+            name: sortTriggers
+            value: "1"
+      # Simple graph of CPU load (use an existing itemid)
+      - type: graph
+        name: "CPU Load"
+        x: 12
+        y: 0
+        width: 12
+        height: 6
+        fields:
+          - type: 1
+            name: itemid
+            value: "12345"         # <-- replace with real itemid
+      # Pie chart of disk space (graphid example)
+      - type: graph
+        name: "Filesystem / Usage"
+        x: 0
+        y: 6
+        width: 12
+        height: 6
+        fields:
+          - type: 2
+            name: graphid
+            value: "67890"         # <-- replace with real graphid
+      # Host availability
+      - type: host_availability
+        name: "Host Availability"
+        x: 12
+        y: 6
+        width: 12
+        height: 6
+        fields:
+          - type: 1
+            name: hostIds
+            value: []              # empty → all hosts
+
+  tasks:
+    # 1) Login as ansible
+    - name: Login to Zabbix API
+      uri:
+        url: "{{ zbx_api_url }}"
+        method: POST
+        body_format: json
+        body:
+          jsonrpc: "2.0"
+          method:  user.login
+          params:
+            username: "{{ zbx_api_user }}"
+            password: "{{ zbx_api_password }}"
+          id: 1
+        headers:
+          Content-Type: application/json-rpc
+      register: zbx_login
+      failed_when: zbx_login.json.error is defined
+
+    - set_fact:
+        zbx_token: "{{ zbx_login.json.result }}"
+
+    # 2) Does the dashboard already exist?
+    - name: Query existing dashboard
+      uri:
+        url: "{{ zbx_api_url }}"
+        method: POST
+        body_format: json
+        body:
+          jsonrpc: "2.0"
+          method:  dashboard.get
+          params:
+            filter:
+              name:
+                - "{{ dashboard_name }}"
+            output: ["dashboardid"]
+          auth: "{{ zbx_token }}"
+          id: 2
+        headers:
+          Content-Type: application/json-rpc
+      register: existing_dash
+
+    - set_fact:
+        dashboard_id: "{{ existing_dash.json.result[0].dashboardid | default(omit) }}"
+
+    # 3) Build “widgets” structure expected by API
+    - name: Assemble widget list
+      set_fact:
+        widgets_payload: >-
+          {{
+            dashboard_widgets
+            | map('combine',
+                {'fields':
+                  item.fields | default([]) |
+                  map('combine', {'type': item.type | default(0)}) | list
+                }
+              )
+            | list
+          }}
+
+    # 4) Create or update dashboard
+    - name: Create new dashboard
+      when: dashboard_id is not defined
+      uri:
+        url: "{{ zbx_api_url }}"
+        method: POST
+        body_format: json
+        body:
+          jsonrpc: "2.0"
+          method:  dashboard.create
+          params:
+            name: "{{ dashboard_name }}"
+            display_period: "{{ dashboard_display_period }}"
+            auto_start: "{{ dashboard_auto_start }}"
+            widgets: "{{ widgets_payload }}"
+          auth: "{{ zbx_token }}"
+          id: 3
+        headers:
+          Content-Type: application/json-rpc
+      register: dash_create
+      failed_when: dash_create.json.error is defined
+
+    - name: Update existing dashboard
+      when: dashboard_id is defined
+      uri:
+        url: "{{ zbx_api_url }}"
+        method: POST
+        body_format: json
+        body:
+          jsonrpc: "2.0"
+          method:  dashboard.update
+          params:
+            dashboardid: "{{ dashboard_id }}"
+            name: "{{ dashboard_name }}"
+            display_period: "{{ dashboard_display_period }}"
+            auto_start: "{{ dashboard_auto_start }}"
+            widgets: "{{ widgets_payload }}"
+          auth: "{{ zbx_token }}"
+          id: 4
+        headers:
+          Content-Type: application/json-rpc
+      register: dash_update
+      failed_when: dash_update.json.error is defined
+
+    # 5) Success message
+    - name: Summary
+      debug:
+        msg: >-
+          Dashboard '{{ dashboard_name }}'
+          {{ 'created' if dashboard_id is not defined else 'updated' }}
+          successfully.
