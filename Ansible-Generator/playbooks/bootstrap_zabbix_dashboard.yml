@@ -3,16 +3,6 @@
 # ------------------------------------------------------------------
 # Creates or updates a Zabbix dashboard named “Cluster Overview”
 # filtered to a single host group via API only (no GUI).
-#
-# Required extra-vars:
-#   zbx_api_url       : Zabbix JSON-RPC URL, e.g. http://10.0.0.42/zabbix/api_jsonrpc.php
-#   zbx_api_password  : Password for the “ansible” API user
-#
-# Optional overrides:
-#   host_group        : name of the host group (default: Linux)
-#   dashboard_name    : name of the dashboard (default: Cluster Overview)
-#   dashboard_period  : display period in seconds (default: 900)
-#   dashboard_auto    : auto-start slideshow (1=yes, 0=no; default: 1)
 
 - name: Provision Zabbix cluster dashboard
   hosts: localhost
@@ -38,7 +28,9 @@
           Missing required variables. Provide:
             • zbx_api_url
             • zbx_api_password
-      when: zbx_api_url is undefined or zbx_api_password is undefined
+      when:
+        - zbx_api_url is undefined
+        - zbx_api_password is undefined
 
     - name: Login to Zabbix API
       uri:
@@ -72,14 +64,17 @@
           params:
             filter:
               name: [ "{{ host_group }}" ]
-            output: ["groupid"]
+            output:
+              - groupid
           auth: "{{ zbx_token }}"
           id: 2
         headers:
           Content-Type: application/json-rpc
       register: grp
-    - set_fact:
-        group_id: "{{ grp.json.result[0].groupid }}"   # :contentReference[oaicite:0]{index=0}
+
+    - name: Set group_id
+      set_fact:
+        group_id: "{{ grp.json.result[0].groupid }}"
 
     - name: Check if dashboard "{{ dashboard_name }}" exists
       uri:
@@ -92,15 +87,18 @@
           params:
             filter:
               name: [ "{{ dashboard_name }}" ]
-            output: ["dashboardid"]
+            output:
+              - dashboardid
           auth: "{{ zbx_token }}"
           id: 3
         headers:
           Content-Type: application/json-rpc
       register: existing
 
-    - set_fact:
-        dashboard_id: "{{ existing.json.result[0].dashboardid | default(omit) }}"
+    - name: Save dashboard_id (if it exists)
+      when: existing.json.result | length > 0
+      set_fact:
+        dashboard_id: "{{ existing.json.result[0].dashboardid }}"
 
     - name: Assemble widget list
       set_fact:
@@ -113,20 +111,20 @@
             width: 12
             height: 6
             fields:
-              - type: 2
+              - type: group
                 name: groupids
                 value: "{{ group_id }}"
           # 2) Host availability widget
-          - type: hostavail
+          - type: host_availability
             name: "Cluster Availability"
             x: 12
             y: 0
             width: 12
             height: 6
             fields:
-              - type: 2
-                name: groupids.0
-                value: "{{ group_id }}"    # :contentReference[oaicite:1]{index=1}
+              - type: group
+                name: groupids
+                value: "{{ group_id }}"
 
     - name: Create new dashboard if absent
       when: dashboard_id is not defined
@@ -147,7 +145,7 @@
         headers:
           Content-Type: application/json-rpc
       register: dash_create
-      failed_when: dash_create.json.error is defined     # :contentReference[oaicite:2]{index=2}
+      failed_when: dash_create.json.error is defined
 
     - name: Update existing dashboard if found
       when: dashboard_id is defined
@@ -169,7 +167,7 @@
         headers:
           Content-Type: application/json-rpc
       register: dash_update
-      failed_when: dash_update.json.error is defined      # :contentReference[oaicite:3]{index=3}
+      failed_when: dash_update.json.error is defined
 
     - name: Dashboard deployment summary
       debug:
