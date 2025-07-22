@@ -104,7 +104,10 @@
           # 1) Problems widget
           - type: problems
             name: "Cluster Problems"
-            x: 0;  y: 0;  width: 12;  height: 6
+            x: 0
+            y: 0
+            width: 12
+            height: 6
             fields:
               - type: 2               # host-group filter
                 name: groupids
@@ -112,7 +115,10 @@
           # 2) Host availability widget
           - type: hostavail
             name: "Cluster Availability"
-            x: 12; y: 0;  width: 12;  height: 6
+            x: 12
+            y: 0
+            width: 12
+            height: 6
             fields:
               - type: 2               # host-group filter
                 name: groupids
