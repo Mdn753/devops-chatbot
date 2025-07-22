@@ -16,7 +16,7 @@
 
 - name: Provision Zabbix dashboard
   hosts: all          # run once from the Zabbix server or a jumphost
-  gather_facts: false
+  gather_facts: true
   vars:
     # --- Zabbix connection -------------------------------------
     zbx_api_url:      "http://{{ ansible_default_ipv4.address }}/zabbix/api_jsonrpc.php"
