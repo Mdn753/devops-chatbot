@@ -160,7 +160,7 @@
               dns: ""
               port: "10050"
           groups:   [ { groupid: "{{ group_id }}" } ]
-          templates:[ { templateid: "{{ template_id }}" } ]
+          templates: [ { templateid: "{{ template_id }}" } ]
           description: "Auto-registered by AWX"
         auth: "{{ zbx_token }}"
         id: 5c
@@ -190,7 +190,7 @@
               dns: ""
               port: "10050"
           groups:   [ { groupid: "{{ group_id }}" } ]
-          templates:[ { templateid: "{{ template_id }}" } ]
+          templates: [ { templateid: "{{ template_id }}" } ]
         auth: "{{ zbx_token }}"
         id: 5u
       headers:
