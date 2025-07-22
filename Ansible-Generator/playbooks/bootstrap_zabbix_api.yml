@@ -27,11 +27,9 @@
     zbx_admin_pass:     "{{ zabbix_admin_password | default('zabbix') }}"
 
     zbx_api_user:       ansible
-    zbx_api_password:   "{{ zabbix_api_password  | default('admin@123') }}"
+    zbx_api_password:   "{{ zabbix_api_password  | default('Admin@1234') }}"
 
-    # Auto-password settings (only used if above is weak)
-    zbx_api_password_length: 24
-    zbx_api_password_denylist: [admin@123, admin, password, zabbix, changeme]
+  
 
     # Front-end config files
     zbx_etc_conf:       /etc/zabbix/zabbix.conf.php
@@ -56,25 +54,7 @@
         - "Interpreter: {{ python_interpreter_path }}"
     tags: always
 
-  # ---------------------------------------------------------------
-  # 0.1 Generate strong password if the supplied one is weak
-  # ---------------------------------------------------------------
-  - name: Generate random strong password when supplied one is weak
-    when: >
-      (zbx_api_password | length < 12) or
-      (zbx_api_password | lower in zbx_api_password_denylist)
-    set_fact:
-      zbx_api_password_effective: >-
-        {{ lookup('community.general.random_password',
-                  'length={{ zbx_api_password_length }} special=true') }}
-    no_log: true
-
-  - name: Use provided password when it is strong enough
-    when: zbx_api_password_effective is not defined
-    set_fact:
-      zbx_api_password_effective: "{{ zbx_api_password }}"
-    no_log: true
-
+ 
   # ---------------------------------------------------------------
   # 1.  Ensure GUI config files
   # ---------------------------------------------------------------
@@ -245,7 +225,7 @@
         params:
           username: "{{ zbx_api_user }}"
           name:     "Ansible Automation (AWX)"
-          passwd:   "{{ zbx_api_password_effective }}"
+          passwd:   "{{ zbx_api_password }}"
           roleid:   "{{ superadmin_roleid }}"
           usrgrps:
             - usrgrpid: "7"
@@ -277,7 +257,7 @@
         method:  user.login
         params:
           username: "{{ zbx_api_user }}"
-          password: "{{ zbx_api_password_effective }}"
+          password: "{{ zbx_api_password}}"
         id: 4
       headers: { Content-Type: application/json-rpc }
     register: api_login
@@ -440,7 +420,7 @@
         • API user ‘{{ zbx_api_user }}’ ready (Super-admin role).
         • Host ‘{{ inventory_hostname }}’ registered in group ‘Linux’.
         • Web UI  : http://{{ ansible_default_ipv4.address }}/zabbix/
-        • Password: {{ zbx_api_password_effective if zbx_api_password_effective != zbx_api_password else '(the one you supplied)' }}
+        • Password: {{ zbx_api_password if zbx_api_password != zbx_api_password else '(the one you supplied)' }}
     no_log: true
     tags: always
 
