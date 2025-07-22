@@ -397,7 +397,7 @@
               dns: ""
               port: "10050"
           groups:   [{ groupid: "{{ linux_groupid }}" }]
-          templates:[{ templateid: "{{ linux_tmplid }}" }]
+          templates: [{ templateid: "{{ linux_tmplid }}" }]
           description: "Host registered by AWX on {{ ansible_date_time.iso8601 }}"
         auth: "{{ api_token }}"
         id: 6.1
