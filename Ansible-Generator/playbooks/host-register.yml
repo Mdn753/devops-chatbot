@@ -1,4 +1,7 @@
 ---
+# host-register.yml  —  Zabbix API host create / update
+# -----------------------------------------------------
+
 - name: Register VM in Zabbix via API
   hosts: localhost
   connection: local
@@ -7,17 +10,15 @@
   vars:
     # ---------- Zabbix connection ----------
     zbx_api_url:      "{{ zbx_api_url | default(omit) }}"
-    zbx_api_user:     "{{ zbx_api_user | default('ansible') }}"
+    zbx_api_user:     "ansible"                       # ← fixed
     zbx_api_password: "{{ zbx_api_password | default(omit) }}"
 
-    # ---------- Inventory defaults ---------
+    # ---------- Inventory defaults ----------
     host_group:    "{{ host_group    | default('Linux') }}"
     template_name: "{{ template_name | default('Linux by Zabbix agent active') }}"
 
   tasks:
-  #################################################################
-  # 0. Sanity check
-  #################################################################
+  # 0. Sanity check ------------------------------------------------------------
   - name: Fail if required vars are missing
     fail:
       msg: |
@@ -32,9 +33,7 @@
       vm_name is undefined or
       vm_ip is undefined
 
-  #################################################################
-  # 1. Login
-  #################################################################
+  # 1. Login -------------------------------------------------------------------
   - name: Login to Zabbix API
     uri:
       url: "{{ zbx_api_url }}"
@@ -55,9 +54,7 @@
   - set_fact:
       zbx_token: "{{ login_rsp.json.result }}"
 
-  #################################################################
-  # 2. Host-group ensure → groupid
-  #################################################################
+  # 2. Ensure host-group exists -> groupid -------------------------------------
   - name: Ensure host-group {{ host_group }}
     uri:
       url: "{{ zbx_api_url }}"
@@ -72,7 +69,7 @@
         id: 2
       headers:
         Content-Type: application/json-rpc
-      status_code: [200, 412]          # 412 = already exists
+      status_code: [200, 412]
     register: grp_create
 
   - name: Get groupid
@@ -95,9 +92,7 @@
   - set_fact:
       group_id: "{{ grp_get.json.result[0].groupid }}"
 
-  #################################################################
-  # 3. Template → templateid
-  #################################################################
+  # 3. Template -> templateid ---------------------------------------------------
   - name: Get templateid for {{ template_name }}
     uri:
       url: "{{ zbx_api_url }}"
@@ -122,9 +117,7 @@
   - set_fact:
       template_id: "{{ tmpl_get.json.result[0].templateid }}"
 
-  #################################################################
-  # 4. host.get
-  #################################################################
+  # 4. host.get ----------------------------------------------------------------
   - name: host.get for {{ vm_name }}
     uri:
       url: "{{ zbx_api_url }}"
@@ -146,9 +139,7 @@
       existing_hostid: "{{ host_lookup.json.result[0].hostid }}"
     when: host_lookup.json.result | length > 0
 
-  #################################################################
-  # 5A. Create
-  #################################################################
+  # 5A. Create -----------------------------------------------------------------
   - name: Create host {{ vm_name }}
     when: existing_hostid is undefined
     uri:
@@ -168,10 +159,8 @@
               ip: "{{ vm_ip }}"
               dns: ""
               port: "10050"
-          groups:
-            - groupid: "{{ group_id }}"
-          templates:
-            - templateid: "{{ template_id }}"
+          groups:   [ { groupid: "{{ group_id }}" } ]
+          templates:[ { templateid: "{{ template_id }}" } ]
           description: "Auto-registered by AWX"
         auth: "{{ zbx_token }}"
         id: 5c
@@ -180,9 +169,7 @@
     register: host_create
     failed_when: host_create.json.error is defined
 
-  #################################################################
-  # 5B. Update
-  #################################################################
+  # 5B. Update -----------------------------------------------------------------
   - name: Update host {{ vm_name }}
     when: existing_hostid is defined
     uri:
@@ -202,10 +189,8 @@
               ip: "{{ vm_ip }}"
               dns: ""
               port: "10050"
-          groups:
-            - groupid: "{{ group_id }}"
-          templates:
-            - templateid: "{{ template_id }}"
+          groups:   [ { groupid: "{{ group_id }}" } ]
+          templates:[ { templateid: "{{ template_id }}" } ]
         auth: "{{ zbx_token }}"
         id: 5u
       headers:
@@ -213,9 +198,7 @@
     register: host_update
     failed_when: host_update.json.error is defined
 
-  #################################################################
-  # 6. Summary
-  #################################################################
+  # 6. Summary -----------------------------------------------------------------
   - debug:
       msg: >
         Host '{{ vm_name }}' {{ 'created' if existing_hostid is undefined else 'updated' }}
