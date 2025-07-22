@@ -18,7 +18,7 @@
     # — Dashboard settings
     host_group:        "Linux"
     dashboard_name:    "Cluster Overview"
-    dashboard_period:  900
+    dashboard_period:  600
     dashboard_auto:    1
 
   tasks:
