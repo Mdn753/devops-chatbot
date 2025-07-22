@@ -1,369 +1,313 @@
 ---
-# bootstrap_zabbix_api.yml  – Idempotently configures the Zabbix GUI and API
-# Compatible with AWX / Ansible Tower
+# bootstrap_zabbix_api.yml - Simplified Version
 # ------------------------------------------------------------
+# Idempotently configures the Zabbix GUI:
+#   • /etc/zabbix/zabbix.conf.php         (main location)
+#   • /usr/share/zabbix/conf/zabbix.conf.php  (symlink)
+#   • Reloads Apache if anything changed
+#   • Creates "ansible" API user (keeps Admin password as default)
+#   • Creates host-group Linux & registers this host
+
 - name: Bootstrap Zabbix GUI via API
   hosts: all
   become: true
   gather_facts: true
 
+  #################################################################
+  # Variables (imported from installer playbook or defaults)
+  #################################################################
   vars:
-    # ---- database ----------------------------------------------------------
-    zbx_db_host: localhost
-    zbx_db_name: "{{ zabbix_db_name    | default('zabbix') }}"
-    zbx_db_user: "{{ zabbix_db_user    | default('zabbix') }}"
-    zbx_db_password: "{{ zabbix_db_password | default('StrongDBpass!') }}"
+    zbx_db_host:        localhost
+    zbx_db_name:        "{{ zabbix_db_name      | default('zabbix') }}"
+    zbx_db_user:        "{{ zabbix_db_user      | default('zabbix') }}"
+    zbx_db_password:    "{{ zabbix_db_password  | default('StrongDBpass!') }}"
 
-    # ---- API + credentials -------------------------------------------------
-    zbx_api_url: "http://{{ ansible_default_ipv4.address }}/zabbix/api_jsonrpc.php"
+    zbx_api_url:        "http://{{ ansible_default_ipv4.address }}/zabbix/api_jsonrpc.php"
 
-    zbx_admin_user:    "Admin"
-    zbx_admin_pass:    "{{ zabbix_admin_password | default('zabbix') }}"
+    zbx_admin_user:     Admin
+    zbx_admin_pass:     "{{ zabbix_admin_password | default('zabbix') }}"
 
-    zbx_api_user:      "ansible"
-    zbx_api_password:  "{{ zabbix_api_password | default('admin@123') }}"
-    zbx_role_name:     "{{ zabbix_role_name | default('Super admin role') }}"  # NEW
+    zbx_api_user:       ansible
+    zbx_api_password:   admin@123
 
-    # ---- frontend config paths --------------------------------------------
-    zbx_etc_conf:        /etc/zabbix/zabbix.conf.php
-    zbx_share_conf_dir:  /usr/share/zabbix/conf
-    zbx_share_conf:      "{{ zbx_share_conf_dir }}/zabbix.conf.php"
+    # primary config file & helper symlink
+    zbx_etc_conf:       /etc/zabbix/zabbix.conf.php
+    zbx_share_conf_dir: /usr/share/zabbix/conf
+    zbx_share_conf:     "{{ zbx_share_conf_dir }}/zabbix.conf.php"
 
+  #################################################################
+  # TASKS
+  #################################################################
   tasks:
-  # -------------------------------------------------------------------------
-  # 1)  Web-frontend php-config (same as before)
-  # -------------------------------------------------------------------------
-  - name: Display execution info
-    debug:
-      msg:
-        - "Target host:  {{ inventory_hostname }}"
-        - "IP address:   {{ ansible_default_ipv4.address }}"
-        - "API URL:      {{ zbx_api_url }}"
+    # 0 ─ Ensure /etc/zabbix exists & write config
+    - name: Ensure /etc/zabbix exists
+      file:
+        path: /etc/zabbix
+        state: directory
+        owner: www-data
+        group: www-data
+        mode: "0755"
 
-  - name: Ensure /etc/zabbix exists
-    file:
-      path: /etc/zabbix
-      state: directory
-      owner: www-data
-      group: www-data
-      mode: "0755"
+    - name: Create / update front-end config
+      copy:
+        dest:   "{{ zbx_etc_conf }}"
+        owner:  www-data
+        group:  www-data
+        mode:   "0640"
+        content: |
+          <?php
+          $DB['TYPE']     = 'MYSQL';
+          $DB['SERVER']   = '{{ zbx_db_host }}';
+          $DB['PORT']     = '3306';
+          $DB['DATABASE'] = '{{ zbx_db_name }}';
+          $DB['USER']     = '{{ zbx_db_user }}';
+          $DB['PASSWORD'] = '{{ zbx_db_password }}';
+          $ZBX_SERVER      = 'localhost';
+          $ZBX_SERVER_PORT = '10051';
+          $ZBX_SERVER_NAME = 'Zabbix';
+          $IMAGE_FORMAT_DEFAULT = IMAGE_FORMAT_PNG;
+          ?>
+      register: copy_result
+      notify: reload apache2
 
-  - name: Create Zabbix frontend config
-    copy:
-      dest:   "{{ zbx_etc_conf }}"
-      owner:  www-data
-      group:  www-data
-      mode:  "0640"
-      content: |
-        <?php
-        $DB['TYPE']     = 'MYSQL';
-        $DB['SERVER']   = '{{ zbx_db_host }}';
-        $DB['PORT']     = '3306';
-        $DB['DATABASE'] = '{{ zbx_db_name }}';
-        $DB['USER']     = '{{ zbx_db_user }}';
-        $DB['PASSWORD'] = '{{ zbx_db_password }}';
-        $ZBX_SERVER      = 'localhost';
-        $ZBX_SERVER_PORT = '10051';
-        $ZBX_SERVER_NAME = 'Zabbix Server';
-        $IMAGE_FORMAT_DEFAULT = IMAGE_FORMAT_PNG;
-        ?>
-    register: config_changed
-    notify: reload apache2
+    # 0-bis ─ Symlink under /usr/share/zabbix/conf
+    - name: Ensure {{ zbx_share_conf_dir }} exists
+      file:
+        path: "{{ zbx_share_conf_dir }}"
+        state: directory
+        owner: www-data
+        group: www-data
+        mode: "0755"
 
-  - name: Ensure share config directory exists
-    file:
-      path: "{{ zbx_share_conf_dir }}"
-      state: directory
-      owner: www-data
-      group: www-data
-      mode: "0755"
+    - name: Link config into /usr/share/zabbix/conf
+      file:
+        src:  "{{ zbx_etc_conf }}"
+        dest: "{{ zbx_share_conf }}"
+        state: link
+        force: yes
+      register: link_result
+      notify: reload apache2
 
-  - name: Symlink frontend config into /usr/share
-    file:
-      src:   "{{ zbx_etc_conf }}"
-      dest:  "{{ zbx_share_conf }}"
-      state: link
-      force: yes
-    notify: reload apache2
+    # flush handlers – reload Apache **now**
+    - meta: flush_handlers
 
-  - meta: flush_handlers
+    - name: Wait for Apache after reload
+      wait_for:
+        host: "{{ ansible_default_ipv4.address }}"
+        port: 80
+        timeout: 120
+      when: copy_result.changed or link_result.changed
 
-  - name: Wait for Apache after config changes
-    wait_for:
-      host: "{{ ansible_default_ipv4.address }}"
-      port: 80
-      timeout: 60
-    when: config_changed.changed
+    # 1 ─ Wait until API answers
+    - name: Wait until Zabbix API is reachable
+      wait_for:
+        host: "{{ ansible_default_ipv4.address }}"
+        port: 80
+        timeout: 120
 
-  - name: Wait for Zabbix API (frontend ready)
-    wait_for:
-      host: "{{ ansible_default_ipv4.address }}"
-      port: 80
-      timeout: 120
+    # 2 ─ Login with default Admin credentials (no password change)
+    - name: Log in as Admin with default password
+      uri:
+        url: "{{ zbx_api_url }}"
+        method: POST
+        body_format: json
+        body:
+          jsonrpc: "2.0"
+          method:  user.login
+          params:
+            username: "{{ zbx_admin_user }}"
+            password: "{{ zbx_admin_pass }}"
+          id: 1
+        headers:
+          Content-Type: application/json
+        status_code: 200
+      register: admin_login
 
-  # -------------------------------------------------------------------------
-  # 2)  Log in as built-in Admin
-  # -------------------------------------------------------------------------
-  - name: Login as Admin user
-    uri:
-      url:          "{{ zbx_api_url }}"
-      method:       POST
-      body_format:  json
-      body:
-        jsonrpc: "2.0"
-        method:  user.login
-        params:
-          username: "{{ zbx_admin_user }}"
-          password: "{{ zbx_admin_pass }}"
-        id: 1
-      headers:
-        Content-Type: application/json
-      status_code: 200
-    register: admin_login
-    retries: 3
-    delay:   5
+    - name: Debug admin login response
+      debug:
+        var: admin_login.json
+        verbosity: 0
 
-  - name: Abort if Admin login failed
-    fail:
-      msg: "Admin login failed: {{ admin_login.json.error }}"
-    when: admin_login.json.error is defined
+    - name: Check for API error in admin login
+      fail:
+        msg: "API Error: {{ admin_login.json.error | to_nice_json }}"
+      when: admin_login.json.error is defined
 
-  - set_fact:
-      admin_token: "{{ admin_login.json.result }}"
+    - name: Set admin token
+      set_fact:
+        admin_token: "{{ admin_login.json.result }}"
+      when: 
+        - admin_login.json is defined
+        - admin_login.json.result is defined
 
-  # -------------------------------------------------------------------------
-  # 3)  Resolve the role ID we want to use (Super admin role by default)  # NEW
-  # -------------------------------------------------------------------------
-  - name: Get role ID for {{ zbx_role_name }}
-    uri:
-      url:          "{{ zbx_api_url }}"
-      method:       POST
-      body_format:  json
-      body:
-        jsonrpc: "2.0"
-        method:  role.get
-        params:
-          filter:
-            name: ["{{ zbx_role_name }}"]
-        auth: "{{ admin_token }}"
-        id: 20
-      headers:
-        Content-Type: application/json
-      status_code: 200
-    register: role_info
+    - name: Fail if admin token not obtained
+      fail:
+        msg: "Failed to get admin token. API response: {{ admin_login.json | to_nice_json }}"
+      when: admin_login.json.result is not defined
 
-  - name: Ensure desired role exists
-    fail:
-      msg: "Role '{{ zbx_role_name }}' not found!"
-    when: role_info.json.result | length == 0
+    # 3 ─ Ensure "ansible" API user exists
+    - name: Look up ansible user
+      uri:
+        url: "{{ zbx_api_url }}"
+        method: POST
+        body_format: json
+        body:
+          jsonrpc: "2.0"
+          method:  user.get
+          params:
+            filter:
+              alias: "{{ zbx_api_user }}"
+          auth: "{{ admin_token }}"
+          id: 2
+        headers:
+          Content-Type: application/json
+        status_code: 200
+      register: api_user_lookup
 
-  - set_fact:
-      zbx_roleid: "{{ role_info.json.result[0].roleid }}"
+    - name: Create ansible super-admin user
+      uri:
+        url: "{{ zbx_api_url }}"
+        method: POST
+        body_format: json
+        body:
+          jsonrpc: "2.0"
+          method:  user.create
+          params:
+            alias:  "{{ zbx_api_user }}"
+            name:   Ansible Automation
+            passwd: "{{ zbx_api_password }}"
+            type:   3                       # super-admin
+            usrgrps:
+              - usrgrpid: "7"               # Zabbix administrators
+          auth: "{{ admin_token }}"
+          id: 3
+        headers:
+          Content-Type: application/json
+        status_code: 200
+      when: api_user_lookup.json.result | length == 0
 
-  # -------------------------------------------------------------------------
-  # 4)  Handle (create / update) the dedicated API user
-  # -------------------------------------------------------------------------
-  - name: Check if ansible user exists
-    uri:
-      url:          "{{ zbx_api_url }}"
-      method:       POST
-      body_format:  json
-      body:
-        jsonrpc: "2.0"
-        method:  user.get
-        params:
-          filter:
-            username: "{{ zbx_api_user }}"          # CHANGED
-        auth: "{{ admin_token }}"
-        id: 2
-      headers:
-        Content-Type: application/json
-      status_code: 200
-    register: user_check
+    # 4 ─ Login as ansible; create group & host
+    - name: Login as ansible
+      uri:
+        url: "{{ zbx_api_url }}"
+        method: POST
+        body_format: json
+        body:
+          jsonrpc: "2.0"
+          method:  user.login
+          params:
+            username: "{{ zbx_api_user }}"
+            password: "{{ zbx_api_password }}"
+          id: 4
+        headers:
+          Content-Type: application/json
+        status_code: 200
+      register: api_login
 
-  - name: Update ansible user if it already exists
-    uri:
-      url:          "{{ zbx_api_url }}"
-      method:       POST
-      body_format:  json
-      body:
-        jsonrpc: "2.0"
-        method:  user.update
-        params:
-          userid:  "{{ user_check.json.result[0].userid }}"
-          passwd:  "{{ zbx_api_password }}"
-          roleid:  "{{ zbx_roleid }}"               # NEW
-          usrgrps:
-            - usrgrpid: "1"                         # Zabbix administrators
-        auth: "{{ admin_token }}"
-        id: 3
-      headers:
-        Content-Type: application/json
-      status_code: 200
-    when: user_check.json.result | length > 0
+    - name: Debug API login response
+      debug:
+        var: api_login.json
+        verbosity: 0
 
-  - name: Create ansible user if it does not exist
-    uri:
-      url:          "{{ zbx_api_url }}"
-      method:       POST
-      body_format:  json
-      body:
-        jsonrpc: "2.0"
-        method:  user.create
-        params:
-          username: "{{ zbx_api_user }}"
-          name:     "Ansible User"
-          passwd:   "{{ zbx_api_password }}"
-          roleid:   "{{ zbx_roleid }}"              # NEW
-          usrgrps:
-            - usrgrpid: "1"
-        auth: "{{ admin_token }}"
-        id: 4
-      headers:
-        Content-Type: application/json
-      status_code: 200
-    when: user_check.json.result | length == 0
+    - name: Set API token
+      set_fact:
+        api_token: "{{ api_login.json.result }}"
+      when:
+        - api_login.json is defined
+        - api_login.json.result is defined
 
-  - pause:
-      seconds: 3
+    - name: Ensure host-group Linux
+      uri:
+        url: "{{ zbx_api_url }}"
+        method: POST
+        body_format: json
+        body:
+          jsonrpc: "2.0"
+          method:  hostgroup.create
+          params:
+            name: Linux
+          auth: "{{ api_token }}"
+          id: 5
+        headers:
+          Content-Type: application/json
+        status_code: [200, 412]     # 412 = already exists
 
-  # -------------------------------------------------------------------------
-  # 5)  Log in as the freshly provisioned API user
-  # -------------------------------------------------------------------------
-  - name: Login as ansible user
-    uri:
-      url:          "{{ zbx_api_url }}"
-      method:       POST
-      body_format:  json
-      body:
-        jsonrpc: "2.0"
-        method:  user.login
-        params:
-          username: "{{ zbx_api_user }}"
-          password: "{{ zbx_api_password }}"
-        id: 5
-      headers:
-        Content-Type: application/json
-      status_code: 200
-    register: api_login
-    retries: 5
-    delay:   3
+    - name: Get IDs for Linux group and template
+      uri:
+        url: "{{ zbx_api_url }}"
+        method: POST
+        body_format: json
+        body:
+          jsonrpc: "2.0"
+          method: batch
+          params:
+            - method: hostgroup.get
+              params:
+                filter:
+                  name: ["Linux"]
+            - method: template.get
+              params:
+                filter:
+                  name: ["Linux by Zabbix agent active"]
+          auth: "{{ api_token }}"
+        headers:
+          Content-Type: application/json
+        status_code: 200
+      register: ids
 
-  - name: Abort if ansible login failed
-    fail:
-      msg: "Ansible user login failed: {{ api_login.json.error }}"
-    when: api_login.json.error is defined
+    - name: Set group and template IDs
+      set_fact:
+        linux_groupid: "{{ ids.json[0].result[0].groupid }}"
+        linux_tmplid:  "{{ ids.json[1].result[0].templateid }}"
+      when:
+        - ids.json is defined
+        - ids.json[0].result is defined
+        - ids.json[0].result | length > 0
+        - ids.json[1].result is defined
+        - ids.json[1].result | length > 0
 
-  - set_fact:
-      api_token: "{{ api_login.json.result }}"
+    - name: Register this server as host
+      uri:
+        url: "{{ zbx_api_url }}"
+        method: POST
+        body_format: json
+        body:
+          jsonrpc: "2.0"
+          method: host.create
+          params:
+            host: "{{ inventory_hostname }}"
+            name: "{{ inventory_hostname }}"
+            interfaces:
+              - type: 1
+                main: 1
+                useip: 1
+                ip: "{{ ansible_default_ipv4.address }}"
+                dns: ""
+                port: "10050"
+            groups:
+              - groupid: "{{ linux_groupid }}"
+            templates:
+              - templateid: "{{ linux_tmplid }}"
+          auth: "{{ api_token }}"
+          id: 6
+        headers:
+          Content-Type: application/json
+        status_code: [200, 412]
+      when:
+        - linux_groupid is defined
+        - linux_tmplid is defined
 
-  # -------------------------------------------------------------------------
-  # 6)  Host-group, template and host provisioning (unchanged)
-  # -------------------------------------------------------------------------
-  - name: Create Linux host group (ignore 'already exists')
-    uri:
-      url:          "{{ zbx_api_url }}"
-      method:       POST
-      body_format:  json
-      body:
-        jsonrpc: "2.0"
-        method:  hostgroup.create
-        params:
-          name: "Linux"
-        auth: "{{ api_token }}"
-        id: 6
-      headers:
-        Content-Type: application/json
-      status_code: [200, 412]
+    # 5 ─ Summary
+    - name: Bootstrap summary
+      debug:
+        msg: >
+          Zabbix GUI initialized with default Admin password 'zabbix',
+          API user "{{ zbx_api_user }}" created,
+          host-group Linux and host {{ inventory_hostname }} present.
 
-  - name: Get Linux group ID
-    uri:
-      url:          "{{ zbx_api_url }}"
-      method:       POST
-      body_format:  json
-      body:
-        jsonrpc: "2.0"
-        method:  hostgroup.get
-        params:
-          filter:
-            name: ["Linux"]
-        auth: "{{ api_token }}"
-        id: 7
-      headers:
-        Content-Type: application/json
-      status_code: 200
-    register: group_result
-
-  - name: Get template ID (Linux by Zabbix agent active)
-    uri:
-      url:          "{{ zbx_api_url }}"
-      method:       POST
-      body_format:  json
-      body:
-        jsonrpc: "2.0"
-        method:  template.get
-        params:
-          filter:
-            name: ["Linux by Zabbix agent active"]
-        auth: "{{ api_token }}"
-        id: 8
-      headers:
-        Content-Type: application/json
-      status_code: 200
-    register: template_result
-
-  - set_fact:
-      linux_groupid: "{{ group_result.json.result[0].groupid }}"
-      linux_tmplid:  "{{ template_result.json.result[0].templateid }}"
-    when:
-      - group_result.json.result   | length > 0
-      - template_result.json.result | length > 0
-
-  - name: Register localhost as a monitored host (ignore 'already exists')
-    uri:
-      url:          "{{ zbx_api_url }}"
-      method:       POST
-      body_format:  json
-      body:
-        jsonrpc: "2.0"
-        method:  host.create
-        params:
-          host: "{{ inventory_hostname }}"
-          name: "{{ inventory_hostname }}"
-          interfaces:
-            - type: 1
-              main: 1
-              useip: 1
-              ip:  "{{ ansible_default_ipv4.address }}"
-              dns: ""
-              port: "10050"
-          groups:
-            - groupid: "{{ linux_groupid }}"
-          templates:
-            - templateid: "{{ linux_tmplid }}"
-        auth: "{{ api_token }}"
-        id: 9
-      headers:
-        Content-Type: application/json
-      status_code: [200, 412]
-    when:
-      - linux_groupid is defined
-      - linux_tmplid  is defined
-
-  # -------------------------------------------------------------------------
-  # 7)  Final summary
-  # -------------------------------------------------------------------------
-  - name: Bootstrap complete
-    debug:
-      msg:
-        - "✔ Zabbix bootstrap completed successfully!"
-        - "   UI:   http://{{ ansible_default_ipv4.address }}/zabbix/"
-        - "   Admin: {{ zbx_admin_user }} / {{ zbx_admin_pass }}"
-        - "   API:  {{ zbx_api_user }} / {{ zbx_api_password }}"
-
-  # -------------------------------------------------------------------------
-  # 8)  Handlers
-  # -------------------------------------------------------------------------
+#################################################################
+# HANDLERS
+#################################################################
   handlers:
     - name: reload apache2
       service:
