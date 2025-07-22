@@ -2,7 +2,7 @@
 # cluster-dashboard.yml
 # ------------------------------------------------------------------
 # Creates or updates a Zabbix dashboard named “Cluster Overview”
-# filtered to a single host group via API only (no GUI).
+# filtered to a single host-group, entirely via API (no GUI).
 
 - name: Provision Zabbix cluster dashboard
   hosts: localhost
@@ -53,7 +53,7 @@
       set_fact:
         zbx_token: "{{ login.json.result }}"
 
-    - name: Get groupid for host group "{{ host_group }}"
+    - name: Get groupid for host-group “{{ host_group }}”
       uri:
         url: "{{ zbx_api_url }}"
         method: POST
@@ -64,8 +64,7 @@
           params:
             filter:
               name: [ "{{ host_group }}" ]
-            output:
-              - groupid
+            output: ["groupid"]
           auth: "{{ zbx_token }}"
           id: 2
         headers:
@@ -76,7 +75,7 @@
       set_fact:
         group_id: "{{ grp.json.result[0].groupid }}"
 
-    - name: Check if dashboard "{{ dashboard_name }}" exists
+    - name: Check if dashboard “{{ dashboard_name }}” exists
       uri:
         url: "{{ zbx_api_url }}"
         method: POST
@@ -87,15 +86,14 @@
           params:
             filter:
               name: [ "{{ dashboard_name }}" ]
-            output:
-              - dashboardid
+            output: ["dashboardid"]
           auth: "{{ zbx_token }}"
           id: 3
         headers:
           Content-Type: application/json-rpc
       register: existing
 
-    - name: Save dashboard_id (if it exists)
+    - name: Save dashboard_id (if found)
       when: existing.json.result | length > 0
       set_fact:
         dashboard_id: "{{ existing.json.result[0].dashboardid }}"
@@ -106,23 +104,17 @@
           # 1) Problems widget
           - type: problems
             name: "Cluster Problems"
-            x: 0
-            y: 0
-            width: 12
-            height: 6
+            x: 0;  y: 0;  width: 12;  height: 6
             fields:
-              - type: group
+              - type: 2               # host-group filter
                 name: groupids
                 value: "{{ group_id }}"
           # 2) Host availability widget
-          - type: host_availability
+          - type: hostavail
             name: "Cluster Availability"
-            x: 12
-            y: 0
-            width: 12
-            height: 6
+            x: 12; y: 0;  width: 12;  height: 6
             fields:
-              - type: group
+              - type: 2               # host-group filter
                 name: groupids
                 value: "{{ group_id }}"
 
@@ -135,13 +127,16 @@
         body:
           jsonrpc: "2.0"
           method:  dashboard.create
+          auth:    "{{ zbx_token }}"
+          id:      4
           params:
-            name: "{{ dashboard_name }}"
+            name:           "{{ dashboard_name }}"
             display_period: "{{ dashboard_period }}"
-            auto_start: "{{ dashboard_auto }}"
-            widgets: "{{ widgets }}"
-          auth: "{{ zbx_token }}"
-          id: 4
+            auto_start:     "{{ dashboard_auto }}"
+            pages:          # Zabbix ≥6.0 requires pages[], not top-level widgets :contentReference[oaicite:0]{index=0}
+              - name:            ""  
+                display_period:  "{{ dashboard_period }}"
+                widgets:         "{{ widgets }}"
         headers:
           Content-Type: application/json-rpc
       register: dash_create
@@ -156,14 +151,17 @@
         body:
           jsonrpc: "2.0"
           method:  dashboard.update
+          auth:    "{{ zbx_token }}"
+          id:      5
           params:
-            dashboardid: "{{ dashboard_id }}"
-            name: "{{ dashboard_name }}"
-            display_period: "{{ dashboard_period }}"
-            auto_start: "{{ dashboard_auto }}"
-            widgets: "{{ widgets }}"
-          auth: "{{ zbx_token }}"
-          id: 5
+            dashboardid:     "{{ dashboard_id }}"
+            name:            "{{ dashboard_name }}"
+            display_period:  "{{ dashboard_period }}"
+            auto_start:      "{{ dashboard_auto }}"
+            pages:
+              - name:            ""
+                display_period:  "{{ dashboard_period }}"
+                widgets:         "{{ widgets }}"
         headers:
           Content-Type: application/json-rpc
       register: dash_update
