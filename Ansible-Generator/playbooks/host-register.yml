@@ -1,5 +1,5 @@
 ---
-# host-register.yml — create/update a VM in Zabbix (with active & passive templates)
+# host-register.yml  — create/update a VM in Zabbix (with active & passive agent templates)
 
 - name: Register VM in Zabbix via API
   hosts: localhost
@@ -7,19 +7,19 @@
   gather_facts: false
 
   vars:
-    # Zabbix API connection
-    zbx_api_url:      "{{ zbx_api_url | default(omit) }}"
-    zbx_api_user:     "ansible"
-    zbx_api_password: "{{ zbx_api_password | default(omit) }}"
+    # Zabbix API connection (must be passed via extra_vars)
+    zbx_api_url:       "{{ zbx_api_url       | default(omit) }}"
+    zbx_api_user:      "ansible"
+    zbx_api_password:  "{{ zbx_api_password | default(omit) }}"
 
     # VM info (must be passed via extra_vars)
-    vm_name: "{{ vm_name | default(omit) }}"
-    vm_ip:   "{{ vm_ip   | default(omit) }}"
+    vm_name:           "{{ vm_name | default(omit) }}"
+    vm_ip:             "{{ vm_ip   | default(omit) }}"
 
     # Defaults
-    host_group:       "Linux"
-    active_template:  "Linux by Zabbix agent active"
-    passive_template: "Template OS Linux"          # ← changed here
+    host_group:        "Linux"
+    active_template:   "Linux by Zabbix agent active"
+    passive_template:  "Linux by Zabbix agent"       # ← correct passive template
 
   tasks:
     - name: Fail if required vars are missing
@@ -43,7 +43,7 @@
         body_format: json
         body:
           jsonrpc: "2.0"
-          method: user.login
+          method:  user.login
           params:
             username: "{{ zbx_api_user }}"
             password: "{{ zbx_api_password }}"
@@ -56,14 +56,14 @@
     - set_fact:
         zbx_token: "{{ login_rsp.json.result }}"
 
-    - name: Ensure host‑group {{ host_group }} exists
+    - name: Ensure host-group {{ host_group }} exists
       uri:
         url: "{{ zbx_api_url }}"
         method: POST
         body_format: json
         body:
           jsonrpc: "2.0"
-          method: hostgroup.create
+          method:  hostgroup.create
           params:
             name: "{{ host_group }}"
           auth: "{{ zbx_token }}"
@@ -80,11 +80,9 @@
         body_format: json
         body:
           jsonrpc: "2.0"
-          method: hostgroup.get
+          method:  hostgroup.get
           params:
-            filter:
-              name:
-                - "{{ host_group }}"
+            filter: { name: [ "{{ host_group }}" ] }
             output: [ "groupid" ]
           auth: "{{ zbx_token }}"
           id: 2.1
@@ -95,18 +93,16 @@
     - set_fact:
         group_id: "{{ grp_get.json.result[0].groupid }}"
 
-    - name: Get active‑template ID ("{{ active_template }}")
+    - name: Get active-template ID ("{{ active_template }}")
       uri:
         url: "{{ zbx_api_url }}"
         method: POST
         body_format: json
         body:
           jsonrpc: "2.0"
-          method: template.get
+          method:  template.get
           params:
-            filter:
-              name:
-                - "{{ active_template }}"
+            filter: { name: [ "{{ active_template }}" ] }
             output: [ "templateid" ]
           auth: "{{ zbx_token }}"
           id: 3
@@ -119,18 +115,16 @@
         msg: "Active template '{{ active_template }}' not found."
       when: tmpl_active.json.result | length == 0
 
-    - name: Get passive‑template ID ("{{ passive_template }}")
+    - name: Get passive-template ID ("{{ passive_template }}")
       uri:
         url: "{{ zbx_api_url }}"
         method: POST
         body_format: json
         body:
           jsonrpc: "2.0"
-          method: template.get
+          method:  template.get
           params:
-            filter:
-              name:
-                - "{{ passive_template }}"
+            filter: { name: [ "{{ passive_template }}" ] }
             output: [ "templateid" ]
           auth: "{{ zbx_token }}"
           id: 3.1
@@ -154,11 +148,9 @@
         body_format: json
         body:
           jsonrpc: "2.0"
-          method: host.get
+          method:  host.get
           params:
-            filter:
-              host:
-                - "{{ vm_name }}"
+            filter: { host: [ "{{ vm_name }}" ] }
             output: [ "hostid" ]
           auth: "{{ zbx_token }}"
           id: 4
@@ -178,10 +170,10 @@
         body_format: json
         body:
           jsonrpc: "2.0"
-          method: host.create
+          method:  host.create
           params:
-            host: "{{ vm_name }}"
-            name: "{{ vm_name }}"
+            host:        "{{ vm_name }}"
+            name:        "{{ vm_name }}"
             interfaces:
               - type: 1
                 main: 1
@@ -189,12 +181,11 @@
                 ip: "{{ vm_ip }}"
                 dns: ""
                 port: "10050"
-            groups:
-              - groupid: "{{ group_id }}"
+            groups:   [ { groupid: "{{ group_id }}" } ]
             templates:
               - templateid: "{{ active_id }}"
               - templateid: "{{ passive_id }}"
-            description: "Auto‑registered by AWX"
+            description: "Auto-registered by AWX"
           auth: "{{ zbx_token }}"
           id: 5
         headers:
@@ -210,10 +201,10 @@
         body_format: json
         body:
           jsonrpc: "2.0"
-          method: host.update
+          method:  host.update
           params:
-            hostid: "{{ existing_hostid }}"
-            name:   "{{ vm_name }}"
+            hostid:      "{{ existing_hostid }}"
+            name:        "{{ vm_name }}"
             interfaces:
               - type: 1
                 main: 1
@@ -221,8 +212,7 @@
                 ip: "{{ vm_ip }}"
                 dns: ""
                 port: "10050"
-            groups:
-              - groupid: "{{ group_id }}"
+            groups:   [ { groupid: "{{ group_id }}" } ]
             templates:
               - templateid: "{{ active_id }}"
               - templateid: "{{ passive_id }}"
