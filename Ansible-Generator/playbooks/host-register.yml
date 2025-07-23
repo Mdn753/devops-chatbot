@@ -1,5 +1,5 @@
 ---
-# host-register.yml  — create/update a VM in Zabbix (with a single “active” template)
+# host-register.yml — create or update a VM in Zabbix with passive‐agent template
 
 - name: Register VM in Zabbix via API
   hosts: localhost
@@ -7,18 +7,18 @@
   gather_facts: false
 
   vars:
-    # Zabbix API connection (must be passed in via extra_vars)
+    # Zabbix API connection (pass these via extra_vars)
     zbx_api_url:       "{{ zbx_api_url       | default(omit) }}"
     zbx_api_user:      "ansible"
     zbx_api_password:  "{{ zbx_api_password | default(omit) }}"
 
-    # VM info (must be passed in via extra_vars)
+    # VM info (pass via extra_vars)
     vm_name:           "{{ vm_name | default(omit) }}"
     vm_ip:             "{{ vm_ip   | default(omit) }}"
 
     # Defaults
     host_group:        "Linux"
-    template_name:     "Linux by Zabbix agent active"
+    template_name:     "Linux by Zabbix agent"
 
   tasks:
     # 0) Sanity check
@@ -41,6 +41,8 @@
       uri:
         url: "{{ zbx_api_url }}"
         method: POST
+        headers:
+          Content-Type: application/json-rpc
         body_format: json
         body:
           jsonrpc: "2.0"
@@ -49,19 +51,20 @@
             username: "{{ zbx_api_user }}"
             password: "{{ zbx_api_password }}"
           id: 1
-        headers:
-          Content-Type: application/json-rpc
       register: login_rsp
       failed_when: login_rsp.json.error is defined
 
-    - set_fact:
+    - name: Set auth token
+      set_fact:
         zbx_token: "{{ login_rsp.json.result }}"
 
     # 2) Ensure host-group exists → group_id
-    - name: Ensure host-group {{ host_group }} exists
+    - name: Ensure host-group "{{ host_group }}" exists
       uri:
         url: "{{ zbx_api_url }}"
         method: POST
+        headers:
+          Content-Type: application/json-rpc
         body_format: json
         body:
           jsonrpc: "2.0"
@@ -70,92 +73,98 @@
             name: "{{ host_group }}"
           auth: "{{ zbx_token }}"
           id: 2
-        headers:
-          Content-Type: application/json-rpc
         status_code: [200, 412]
       register: grp_create
 
-    - name: Get group_id for {{ host_group }}
+    - name: Get group_id for "{{ host_group }}"
       uri:
         url: "{{ zbx_api_url }}"
         method: POST
+        headers:
+          Content-Type: application/json-rpc
         body_format: json
         body:
           jsonrpc: "2.0"
           method:  hostgroup.get
           params:
-            filter: { name: [ "{{ host_group }}" ] }
+            filter:
+              name: [ "{{ host_group }}" ]
             output: [ "groupid" ]
           auth: "{{ zbx_token }}"
           id: 2.1
-        headers:
-          Content-Type: application/json-rpc
       register: grp_get
 
-    - set_fact:
+    - name: Set group_id fact
+      set_fact:
         group_id: "{{ grp_get.json.result[0].groupid }}"
 
-    # 3) Lookup the “active” template ID
-    - name: Get template_id for {{ template_name }}
+    # 3) Lookup passive‐agent template ID
+    - name: Get template_id for "{{ template_name }}"
       uri:
         url: "{{ zbx_api_url }}"
         method: POST
+        headers:
+          Content-Type: application/json-rpc
         body_format: json
         body:
           jsonrpc: "2.0"
           method:  template.get
           params:
-            filter: { name: [ "{{ template_name }}" ] }
+            filter:
+              name: [ "{{ template_name }}" ]
             output: [ "templateid" ]
           auth: "{{ zbx_token }}"
           id: 3
-        headers:
-          Content-Type: application/json-rpc
       register: tmpl_get
 
     - name: Fail if template not found
       fail:
-        msg: "Template '{{ template_name }}' not found."
+        msg: "Template '{{ template_name }}' not found in Zabbix."
       when: tmpl_get.json.result | length == 0
 
-    - set_fact:
+    - name: Set template_id fact
+      set_fact:
         template_id: "{{ tmpl_get.json.result[0].templateid }}"
 
-    # 4) Check if host already exists
-    - name: host.get for {{ vm_name }}
+    # 4) Check if host exists
+    - name: Check for existing host "{{ vm_name }}"
       uri:
         url: "{{ zbx_api_url }}"
         method: POST
+        headers:
+          Content-Type: application/json-rpc
         body_format: json
         body:
           jsonrpc: "2.0"
           method:  host.get
           params:
-            filter: { host: [ "{{ vm_name }}" ] }
+            filter:
+              host: [ "{{ vm_name }}" ]
             output: [ "hostid" ]
           auth: "{{ zbx_token }}"
           id: 4
-        headers:
-          Content-Type: application/json-rpc
       register: host_lookup
 
-    - set_fact:
+    - name: Set existing_hostid fact (if any)
+      set_fact:
         existing_hostid: "{{ host_lookup.json.result[0].hostid }}"
       when: host_lookup.json.result | length > 0
 
-    # 5A) Create new host if missing
-    - name: Create host {{ vm_name }}
-      when: existing_hostid is undefined
+    # 5A) Create host if missing
+    - name: Create host "{{ vm_name }}"
+      when: existing_hostid is not defined
       uri:
         url: "{{ zbx_api_url }}"
         method: POST
+        headers:
+          Content-Type: application/json-rpc
         body_format: json
         body:
           jsonrpc: "2.0"
           method:  host.create
           params:
-            host:        "{{ vm_name }}"
-            name:        "{{ vm_name }}"
+            host: "{{ vm_name }}"
+            name: "{{ vm_name }}"
             interfaces:
               - type: 1
                 main: 1
@@ -163,30 +172,31 @@
                 ip: "{{ vm_ip }}"
                 dns: ""
                 port: "10050"
-            groups:   [ { groupid: "{{ group_id }}" } ]
+            groups:
+              - groupid: "{{ group_id }}"
             templates:
               - templateid: "{{ template_id }}"
             description: "Auto-registered by AWX"
           auth: "{{ zbx_token }}"
           id: 5
-        headers:
-          Content-Type: application/json-rpc
       register: host_create
       failed_when: host_create.json.error is defined
 
-    # 5B) Update existing host if found
-    - name: Update host {{ vm_name }}
+    # 5B) Update host if exists
+    - name: Update host "{{ vm_name }}"
       when: existing_hostid is defined
       uri:
         url: "{{ zbx_api_url }}"
         method: POST
+        headers:
+          Content-Type: application/json-rpc
         body_format: json
         body:
           jsonrpc: "2.0"
           method:  host.update
           params:
-            hostid:      "{{ existing_hostid }}"
-            name:        "{{ vm_name }}"
+            hostid: "{{ existing_hostid }}"
+            name:   "{{ vm_name }}"
             interfaces:
               - type: 1
                 main: 1
@@ -194,13 +204,12 @@
                 ip: "{{ vm_ip }}"
                 dns: ""
                 port: "10050"
-            groups:   [ { groupid: "{{ group_id }}" } ]
+            groups:
+              - groupid: "{{ group_id }}"
             templates:
               - templateid: "{{ template_id }}"
           auth: "{{ zbx_token }}"
           id: 6
-        headers:
-          Content-Type: application/json-rpc
       register: host_update
       failed_when: host_update.json.error is defined
 
@@ -208,5 +217,6 @@
     - name: Registration summary
       debug:
         msg: >-
-          Host '{{ vm_name }}' {{ 'created' if existing_hostid is undefined else 'updated' }}
-          with template '{{ template_name }}' in group '{{ host_group }}'.
+          Host '{{ vm_name }}'
+          {{ 'created' if existing_hostid is not defined else 'updated' }}
+          in group '{{ host_group }}' using template '{{ template_name }}'.
