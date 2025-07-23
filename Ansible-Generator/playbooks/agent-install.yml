@@ -1,26 +1,47 @@
 ---
 - name: Install & configure Zabbix agent
-  hosts: all            # ← static
+  hosts: all
   become: true
 
   vars:
+    # Must pass in your Zabbix server’s IP or DNS name
     zbx_server_ip: "{{ zbx_server_ip }}"
 
   tasks:
-    - name: Install package
+    - name: Install Zabbix agent package
       package:
         name: zabbix-agent
         state: present
 
-    - name: Configure active server
-      lineinfile:
-        path: /etc/zabbix/zabbix_agentd.conf
-        regexp: '^ServerActive='
-        line: "ServerActive={{ zbx_server_ip }}"
+    - name: Configure Zabbix agent for passive & active checks
+      block:
+        - name: Allow passive checks from the server
+          lineinfile:
+            path: /etc/zabbix/zabbix_agentd.conf
+            regexp: '^Server='
+            line: "Server={{ zbx_server_ip }}"
 
-    - name: Enable & start service
+        - name: Send active checks back to the server
+          lineinfile:
+            path: /etc/zabbix/zabbix_agentd.conf
+            regexp: '^ServerActive='
+            line: "ServerActive={{ zbx_server_ip }}"
+
+        - name: Listen on all interfaces (not just localhost)
+          lineinfile:
+            path: /etc/zabbix/zabbix_agentd.conf
+            regexp: '^ListenIP='
+            line: "ListenIP=0.0.0.0"
+      notify: restart zabbix-agent
+
+    - name: Enable and start the agent
       service:
         name: zabbix-agent
         state: started
         enabled: yes
 
+  handlers:
+    - name: restart zabbix-agent
+      service:
+        name: zabbix-agent
+        state: restarted
