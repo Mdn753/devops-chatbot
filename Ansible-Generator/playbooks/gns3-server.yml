@@ -1,25 +1,23 @@
-# gns3-server.yml – install GNS3 3.x on *one* freshly-created Ubuntu-22.04 VM
-# ---------------------------------------------------------------------------
-# USAGE EXAMPLES
-#   ansible-playbook gns3-server.yml -e "new_vm_host=gns3-srv01"
-#   (AWX) → Job Template → Extra-vars:  { "new_vm_host": "gns3-srv01" }
+---
+# gns3-server.yml – install GNS3 3.x on every host in the gns3-servers group
 
 - name: Install & configure a dedicated GNS3 server
   hosts: gns3-servers
   become: yes
   gather_facts: yes
 
-  # ───── Sanity guard ──────────────────────────────────────────────────────
-  pre_tasks:
-    - name: Fail early if caller forgot new_vm_host
-      ansible.builtin.assert:
-        that:
-          - new_vm_host is defined
-          - new_vm_host | length > 0
-        fail_msg: |
-          You must supply ­-e "new_vm_host=<inventory-host>" (or set it in AWX
-          Extra-vars). The playbook then targets *only* that VM.
+  #################################################################
+  # Variables
+  #################################################################
+  vars:
+    # Handy for log / debug messages; overridden automatically if you
+    # still choose to pass `extra_vars: { new_vm_host: … }`
+    new_vm_host: "{{ inventory_hostname }}"
 
+  #################################################################
+  # Pre-tasks: sanity checks
+  #################################################################
+  pre_tasks:
     - name: Verify we’re on Ubuntu 22.04 (Jammy)
       ansible.builtin.assert:
         that:
@@ -33,7 +31,9 @@
         state: present
         update_cache: yes
 
-  # ───── Actual installation ───────────────────────────────────────────────
+  #################################################################
+  # GNS3 installation
+  #################################################################
   tasks:
     - name: Enable the official GNS3 PPA
       ansible.builtin.apt_repository:
@@ -64,10 +64,12 @@
         groups: kvm,libvirt,ubridge,docker
         append: yes
 
-  # ───── Friendly reminder ─────────────────────────────────────────────────
+  #################################################################
+  # Post-tasks
+  #################################################################
   post_tasks:
     - name: Warn about re-login requirement
       ansible.builtin.debug:
         msg: >
-          GNS3 installed. Log out and back in (or reboot) so the new group
-          memberships take effect on {{ new_vm_host }}.
+          GNS3 installed on {{ new_vm_host }}.
+          Log out and back in (or reboot) so the new group memberships take effect.
