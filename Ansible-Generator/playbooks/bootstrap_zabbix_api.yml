@@ -6,7 +6,7 @@
 # • Registers this host in the “Linux” host-group
 
 - name: Bootstrap Zabbix GUI via API
-  hosts: gns3-servers
+  hosts: all
   become: true
   gather_facts: true
 

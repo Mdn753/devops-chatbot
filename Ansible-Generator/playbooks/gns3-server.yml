@@ -5,7 +5,7 @@
 #   (AWX) → Job Template → Extra-vars:  { "new_vm_host": "gns3-srv01" }
 
 - name: Install & configure a dedicated GNS3 server
-  hosts: "{{ new_vm_host }}"
+  hosts: gns3-servers
   become: yes
   gather_facts: yes
 
