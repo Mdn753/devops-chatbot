@@ -1,48 +1,71 @@
 ---
-# gns3-server.yml — install GNS3 3.x on every host in the “gns3-servers” group
-# Put each new VM into that group (your n8n workflow already does this).
+# gns3-server.yml — install GNS3 3.x on every host in group “gns3-servers”
 
 - name: Install & configure a dedicated GNS3 server
   hosts: gns3-servers
   become: yes
   gather_facts: yes
 
-  #################################################################
-  # Variables (optional convenience)
-  #################################################################
   vars:
     new_vm_host: "{{ inventory_hostname }}"
+    gns3_key_url: >-
+      https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x86C22C2EC6A24D7F
+    gns3_keyring: /usr/share/keyrings/gns3.gpg
+    gns3_repo: >-
+      deb [signed-by={{ gns3_keyring }}] https://ppa.launchpadcontent.net/gns3/ppa/ubuntu
+      {{ 'jammy' }} main                     # jammy packages run fine on 24.04 too
 
-  #################################################################
-  # Pre-tasks: sanity checks
-  #################################################################
   pre_tasks:
-    - name: Verify we’re on a supported Ubuntu LTS (20.04 or newer)
-      ansible.builtin.assert:
+    - name: Verify we’re on Ubuntu LTS 20.04 or newer
+      assert:
         that:
-          - ansible_facts['distribution'] == 'Ubuntu'
-          - ansible_facts['distribution_version'] is version('20.04', '>=')
+          - ansible_facts.distribution == "Ubuntu"
+          - ansible_facts.distribution_version is version('20.04', '>=')
         fail_msg: >
-          This playbook supports Ubuntu 20.04, 22.04 or newer LTS. Detected
-          {{ ansible_facts['distribution'] }} {{ ansible_facts['distribution_version'] }}.
+          Only Ubuntu 20.04 LTS or newer is supported (detected
+          {{ ansible_facts.distribution }} {{ ansible_facts.distribution_version }}).
 
-    - name: Ensure helper tool for add-apt-repository is present
-      ansible.builtin.apt:
+    - name: Ensure helper pkg for add-apt-repository
+      apt:
         name: software-properties-common
         state: present
         update_cache: yes
 
-  #################################################################
-  # GNS3 installation
-  #################################################################
   tasks:
-    - name: Enable the official GNS3 PPA
-      ansible.builtin.apt_repository:
-        repo: ppa:gns3/ppa
-        state: present
+    ###################################################################
+    # 1.  Add GNS3 PPA (except on 20.04 where universe already ships 2.2)
+    ###################################################################
+    - name: Download GNS3 PPA signing key (HTTPS)
+      get_url:
+        url: "{{ gns3_key_url }}"
+        dest: /tmp/gns3.asc
+        mode: '0644'
+      when: ansible_facts.distribution_version != '20.04'
 
-    - name: Install GNS3 daemon + hypervisor helpers
-      ansible.builtin.apt:
+    - name: Convert key to gpg keyring
+      command: >
+        gpg --dearmor -o {{ gns3_keyring }} /tmp/gns3.asc
+      args:
+        creates: "{{ gns3_keyring }}"
+      when: ansible_facts.distribution_version != '20.04'
+
+    - name: Add GNS3 APT repository (manual entry)
+      apt_repository:
+        repo: "{{ gns3_repo }}"
+        filename: gns3
+        state: present
+      when: ansible_facts.distribution_version != '20.04'
+
+    ###################################################################
+    # 2.  Install GNS3 and helper packages
+    ###################################################################
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Install GNS3 server + helpers
+      apt:
         name:
           - gns3-server
           - qemu-kvm
@@ -50,27 +73,16 @@
           - ubridge
           - docker.io
         state: present
-        update_cache: yes
 
-    - name: Ensure an “ansible” service user exists
-      ansible.builtin.user:
+    - name: Ensure “ansible” service user exists
+      user:
         name: ansible
-        groups: sudo
+        groups: sudo,kvm,libvirt,ubridge,docker
         append: yes
         create_home: yes
 
-    - name: Add the user to KVM / Libvirt / ubridge / Docker groups
-      ansible.builtin.user:
-        name: ansible
-        groups: kvm,libvirt,ubridge,docker
-        append: yes
-
-  #################################################################
-  # Post-tasks: friendly reminder
-  #################################################################
   post_tasks:
-    - name: Warn about re-login requirement
-      ansible.builtin.debug:
+    - debug:
         msg: >
-          GNS3 installed on {{ new_vm_host }}.  Log out and back in (or reboot)
-          so the new group memberships take effect.
+          ✅ GNS3 installed on {{ new_vm_host }}.
+          Log out and back in (or reboot) so new group memberships take effect.
