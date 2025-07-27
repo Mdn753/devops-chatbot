@@ -1,13 +1,46 @@
-# gns3-server.yml  – install GNS3 3.x on Ubuntu 22.04
-- hosts: gns3
+# gns3-server.yml – install GNS3 3.x on *one* freshly-created Ubuntu-22.04 VM
+# ---------------------------------------------------------------------------
+# USAGE EXAMPLES
+#   ansible-playbook gns3-server.yml -e "new_vm_host=gns3-srv01"
+#   (AWX) → Job Template → Extra-vars:  { "new_vm_host": "gns3-srv01" }
+
+- name: Install & configure a dedicated GNS3 server
+  hosts: "{{ new_vm_host }}"
   become: yes
+  gather_facts: yes
+
+  # ───── Sanity guard ──────────────────────────────────────────────────────
+  pre_tasks:
+    - name: Fail early if caller forgot new_vm_host
+      ansible.builtin.assert:
+        that:
+          - new_vm_host is defined
+          - new_vm_host | length > 0
+        fail_msg: |
+          You must supply ­-e "new_vm_host=<inventory-host>" (or set it in AWX
+          Extra-vars). The playbook then targets *only* that VM.
+
+    - name: Verify we’re on Ubuntu 22.04 (Jammy)
+      ansible.builtin.assert:
+        that:
+          - ansible_facts['os_family'] == "Debian"
+          - ansible_facts['distribution_version'] is version('22.04', '==')
+        fail_msg: "This playbook supports only Ubuntu 22.04 LTS."
+
+    - name: Ensure helper tool for add-apt-repository is present
+      ansible.builtin.apt:
+        name: software-properties-common
+        state: present
+        update_cache: yes
+
+  # ───── Actual installation ───────────────────────────────────────────────
   tasks:
-    - name: Enable official PPA
+    - name: Enable the official GNS3 PPA
       ansible.builtin.apt_repository:
         repo: ppa:gns3/ppa
         state: present
 
-    - name: Install GNS3 daemon + KVM helpers
+    - name: Install GNS3 daemon + hypervisor helpers
       ansible.builtin.apt:
         name:
           - gns3-server
@@ -18,8 +51,23 @@
         state: present
         update_cache: yes
 
-    - name: Add “ansible” user to kvm/libvirt/ubridge
+    - name: Ensure an “ansible” service user exists
+      ansible.builtin.user:
+        name: ansible
+        groups: sudo
+        append: yes
+        create_home: yes
+
+    - name: Add the user to KVM / Libvirt / ubridge / Docker groups
       ansible.builtin.user:
         name: ansible
         groups: kvm,libvirt,ubridge,docker
         append: yes
+
+  # ───── Friendly reminder ─────────────────────────────────────────────────
+  post_tasks:
+    - name: Warn about re-login requirement
+      ansible.builtin.debug:
+        msg: >
+          GNS3 installed. Log out and back in (or reboot) so the new group
+          memberships take effect on {{ new_vm_host }}.
