@@ -1,0 +1,25 @@
+# gns3-server.yml  – install GNS3 3.x on Ubuntu 22.04
+- hosts: gns3
+  become: yes
+  tasks:
+    - name: Enable official PPA
+      ansible.builtin.apt_repository:
+        repo: ppa:gns3/ppa
+        state: present
+
+    - name: Install GNS3 daemon + KVM helpers
+      ansible.builtin.apt:
+        name:
+          - gns3-server
+          - qemu-kvm
+          - libvirt-daemon-system
+          - ubridge
+          - docker.io
+        state: present
+        update_cache: yes
+
+    - name: Add “ansible” user to kvm/libvirt/ubridge
+      ansible.builtin.user:
+        name: ansible
+        groups: kvm,libvirt,ubridge,docker
+        append: yes
