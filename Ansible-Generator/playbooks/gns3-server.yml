@@ -1,29 +1,37 @@
 ---
-# gns3-server.yml — install GNS3 3.x on every host in group “gns3-servers”
+# gns3-server.yml — install & enable GNS3 on all hosts in “gns3-servers”
 
 - name: Install & configure a dedicated GNS3 server
   hosts: gns3-servers
   become: yes
   gather_facts: yes
 
+  ###################################################################
+  # Variables
+  ###################################################################
   vars:
     new_vm_host: "{{ inventory_hostname }}"
-    gns3_key_url: >-
-      https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x86C22C2EC6A24D7F
+    gns3_key_url: "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x86C22C2EC6A24D7F"
     gns3_keyring: /usr/share/keyrings/gns3.gpg
     gns3_repo: >-
-      deb [signed-by={{ gns3_keyring }}] https://ppa.launchpadcontent.net/gns3/ppa/ubuntu
-      {{ 'jammy' }} main                     # jammy packages run fine on 24.04 too
+      deb [signed-by={{ gns3_keyring }}]
+      https://ppa.launchpadcontent.net/gns3/ppa/ubuntu
+      {{ 'jammy' }} main          # jammy packages run fine on 24.04
+    gns3_unit_path_pkg:  "/lib/systemd/system/gns3.service"
+    gns3_unit_path_local: "/etc/systemd/system/gns3.service"
 
+  ###################################################################
+  # Pre-tasks: host sanity
+  ###################################################################
   pre_tasks:
-    - name: Verify we’re on Ubuntu LTS 20.04 or newer
+    - name: Verify we are on Ubuntu 20.04 LTS or newer
       assert:
         that:
           - ansible_facts.distribution == "Ubuntu"
           - ansible_facts.distribution_version is version('20.04', '>=')
         fail_msg: >
-          Only Ubuntu 20.04 LTS or newer is supported (detected
-          {{ ansible_facts.distribution }} {{ ansible_facts.distribution_version }}).
+          Only Ubuntu 20.04 LTS or newer is supported
+          (found {{ ansible_facts.distribution }} {{ ansible_facts.distribution_version }}).
 
     - name: Ensure helper pkg for add-apt-repository
       apt:
@@ -31,34 +39,33 @@
         state: present
         update_cache: yes
 
+  ###################################################################
+  # Tasks
+  ###################################################################
   tasks:
-    ###################################################################
-    # 1.  Add GNS3 PPA (except on 20.04 where universe already ships 2.2)
-    ###################################################################
-    - name: Download GNS3 PPA signing key (HTTPS)
+    # ── 1 • Add PPA and signing key (skipped on 20.04) ──────────────
+    - name: Download GNS3 signing key
       get_url:
         url: "{{ gns3_key_url }}"
         dest: /tmp/gns3.asc
         mode: '0644'
       when: ansible_facts.distribution_version != '20.04'
 
-    - name: Convert key to gpg keyring
+    - name: Convert key to keyring
       command: >
         gpg --dearmor -o {{ gns3_keyring }} /tmp/gns3.asc
       args:
         creates: "{{ gns3_keyring }}"
       when: ansible_facts.distribution_version != '20.04'
 
-    - name: Add GNS3 APT repository (manual entry)
+    - name: Add GNS3 PPA repository
       apt_repository:
         repo: "{{ gns3_repo }}"
         filename: gns3
         state: present
       when: ansible_facts.distribution_version != '20.04'
 
-    ###################################################################
-    # 2.  Install GNS3 and helper packages
-    ###################################################################
+    # ── 2 • Install packages ────────────────────────────────────────
     - name: Update apt cache
       apt:
         update_cache: yes
@@ -67,7 +74,7 @@
     - name: Install GNS3 server + helpers
       apt:
         name:
-          - gns3-server
+          - gns3-server         # 2.2.x on focal, 3.x on jammy/noble
           - qemu-kvm
           - libvirt-daemon-system
           - ubridge
@@ -81,8 +88,58 @@
         append: yes
         create_home: yes
 
+    # ── 3 • Create a systemd unit if the package forgot to ──────────
+    - name: Check if unit shipped by package
+      stat:
+        path: "{{ gns3_unit_path_pkg }}"
+      register: pkg_unit
+
+    - name: Check if unit already created locally
+      stat:
+        path: "{{ gns3_unit_path_local }}"
+      register: local_unit
+
+    - name: Drop local gns3.service unit
+      copy:
+        dest: "{{ gns3_unit_path_local }}"
+        mode: '0644'
+        content: |
+          [Unit]
+          Description=GNS3 server
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=simple
+          User=ansible
+          Group=ansible
+          ExecStart=/usr/bin/gns3server
+          Restart=on-failure
+
+          [Install]
+          WantedBy=multi-user.target
+      when: not pkg_unit.stat.exists and not local_unit.stat.exists
+      notify: reload systemd
+
+    # ── 4 • Enable + start service ──────────────────────────────────
+    - name: Enable & start gns3 service
+      systemd:
+        name: gns3
+        state: started
+        enabled: yes
+
+  ###################################################################
+  # Handlers
+  ###################################################################
+  handlers:
+    - name: reload systemd
+      command: systemctl daemon-reload
+
+  ###################################################################
+  # Post-tasks
+  ###################################################################
   post_tasks:
     - debug:
-        msg: >
-          ✅ GNS3 installed on {{ new_vm_host }}.
-          Log out and back in (or reboot) so new group memberships take effect.
+        msg: |
+          ✅ GNS3 installed and running on {{ new_vm_host }}.
+          Access API at http://{{ ansible_default_ipv4.address }}:3080
