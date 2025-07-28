@@ -1,5 +1,5 @@
 ---
-# gns3-server.yml — install & enable GNS3 on all hosts in “gns3-servers”
+# gns3-server.yml — install & expose GNS3 on every host in group “gns3-servers”
 
 - name: Install & configure a dedicated GNS3 server
   hosts: gns3-servers
@@ -7,34 +7,36 @@
   gather_facts: yes
 
   ###################################################################
-  # Variables
+  # Variables (tweak these if you want a different bind address/port)
   ###################################################################
   vars:
-    new_vm_host: "{{ inventory_hostname }}"
+    gns3_listen_host: "0.0.0.0"
+    gns3_listen_port: 3080
+
     gns3_key_url: "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x86C22C2EC6A24D7F"
     gns3_keyring: /usr/share/keyrings/gns3.gpg
     gns3_repo: >-
       deb [signed-by={{ gns3_keyring }}]
       https://ppa.launchpadcontent.net/gns3/ppa/ubuntu
-      {{ 'jammy' }} main          # jammy packages run fine on 24.04
+      {{ 'jammy' }} main            # jammy builds run fine on 24.04, skip on 20.04
     gns3_unit_path_pkg:  "/lib/systemd/system/gns3.service"
     gns3_unit_path_local: "/etc/systemd/system/gns3.service"
 
   ###################################################################
-  # Pre-tasks: host sanity
+  # Pre-tasks: basic host sanity
   ###################################################################
   pre_tasks:
-    - name: Verify we are on Ubuntu 20.04 LTS or newer
-      assert:
+    - name: Allow only Ubuntu ≥ 20.04
+      ansible.builtin.assert:
         that:
           - ansible_facts.distribution == "Ubuntu"
           - ansible_facts.distribution_version is version('20.04', '>=')
         fail_msg: >
-          Only Ubuntu 20.04 LTS or newer is supported
+          This playbook supports Ubuntu 20.04 LTS or newer
           (found {{ ansible_facts.distribution }} {{ ansible_facts.distribution_version }}).
 
-    - name: Ensure helper pkg for add-apt-repository
-      apt:
+    - name: Ensure helper pkg for add-apt-repository is present
+      ansible.builtin.apt:
         name: software-properties-common
         state: present
         update_cache: yes
@@ -43,38 +45,38 @@
   # Tasks
   ###################################################################
   tasks:
-    # ── 1 • Add PPA and signing key (skipped on 20.04) ──────────────
+    # -- 1 ▸ Add PPA & key (skip on 20.04) ---------------------------
     - name: Download GNS3 signing key
-      get_url:
+      ansible.builtin.get_url:
         url: "{{ gns3_key_url }}"
         dest: /tmp/gns3.asc
         mode: '0644'
       when: ansible_facts.distribution_version != '20.04'
 
     - name: Convert key to keyring
-      command: >
-        gpg --dearmor -o {{ gns3_keyring }} /tmp/gns3.asc
+      ansible.builtin.command:
+        cmd: gpg --dearmor -o {{ gns3_keyring }} /tmp/gns3.asc
       args:
         creates: "{{ gns3_keyring }}"
       when: ansible_facts.distribution_version != '20.04'
 
     - name: Add GNS3 PPA repository
-      apt_repository:
+      ansible.builtin.apt_repository:
         repo: "{{ gns3_repo }}"
         filename: gns3
         state: present
       when: ansible_facts.distribution_version != '20.04'
 
-    # ── 2 • Install packages ────────────────────────────────────────
+    # -- 2 ▸ Install packages ---------------------------------------
     - name: Update apt cache
-      apt:
+      ansible.builtin.apt:
         update_cache: yes
         cache_valid_time: 3600
 
     - name: Install GNS3 server + helpers
-      apt:
+      ansible.builtin.apt:
         name:
-          - gns3-server         # 2.2.x on focal, 3.x on jammy/noble
+          - gns3-server           # 2.2.x on focal, 3.x on jammy & noble
           - qemu-kvm
           - libvirt-daemon-system
           - ubridge
@@ -82,25 +84,40 @@
         state: present
 
     - name: Ensure “ansible” service user exists
-      user:
+      ansible.builtin.user:
         name: ansible
         groups: sudo,kvm,libvirt,ubridge,docker
         append: yes
         create_home: yes
 
-    # ── 3 • Create a systemd unit if the package forgot to ──────────
-    - name: Check if unit shipped by package
-      stat:
+    # -- 3 ▸ Systemd unit handling ----------------------------------
+    - name: Check if distro ships a unit file
+      ansible.builtin.stat:
         path: "{{ gns3_unit_path_pkg }}"
       register: pkg_unit
 
-    - name: Check if unit already created locally
-      stat:
-        path: "{{ gns3_unit_path_local }}"
-      register: local_unit
+    - name: Ensure override directory exists (when distro unit present)
+      ansible.builtin.file:
+        path: /etc/systemd/system/gns3.service.d
+        state: directory
+        mode: '0755'
+      when: pkg_unit.stat.exists
 
-    - name: Drop local gns3.service unit
-      copy:
+    - name: Drop override to bind on {{ gns3_listen_host }}:{{ gns3_listen_port }}
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/gns3.service.d/override.conf
+        mode: '0644'
+        content: |
+          [Service]
+          ExecStart=
+          ExecStart=/usr/bin/gns3server --host {{ gns3_listen_host }} --port {{ gns3_listen_port }}
+      when: pkg_unit.stat.exists
+      notify:
+        - reload systemd
+        - restart gns3
+
+    - name: Create custom gns3.service when no distro unit
+      ansible.builtin.copy:
         dest: "{{ gns3_unit_path_local }}"
         mode: '0644'
         content: |
@@ -113,17 +130,18 @@
           Type=simple
           User=ansible
           Group=ansible
-          ExecStart=/usr/bin/gns3server
+          ExecStart=/usr/bin/gns3server --host {{ gns3_listen_host }} --port {{ gns3_listen_port }}
           Restart=on-failure
 
           [Install]
           WantedBy=multi-user.target
-      when: not pkg_unit.stat.exists and not local_unit.stat.exists
-      notify: reload systemd
+      when: not pkg_unit.stat.exists
+      notify:
+        - reload systemd
 
-    # ── 4 • Enable + start service ──────────────────────────────────
-    - name: Enable & start gns3 service
-      systemd:
+    # -- 4 ▸ Enable & start service ---------------------------------
+    - name: Enable and start gns3 service
+      ansible.builtin.systemd:
         name: gns3
         state: started
         enabled: yes
@@ -133,13 +151,19 @@
   ###################################################################
   handlers:
     - name: reload systemd
-      command: systemctl daemon-reload
+      ansible.builtin.command: systemctl daemon-reload
+
+    - name: restart gns3
+      ansible.builtin.systemd:
+        name: gns3
+        state: restarted
+        daemon_reload: false
 
   ###################################################################
   # Post-tasks
   ###################################################################
   post_tasks:
-    - debug:
-        msg: |
-          ✅ GNS3 installed and running on {{ new_vm_host }}.
-          Access API at http://{{ ansible_default_ipv4.address }}:3080
+    - ansible.builtin.debug:
+        msg: >
+          ✅ GNS3 is listening on {{ gns3_listen_host }}:{{ gns3_listen_port }}.
+          Access it from containers via http://host.docker.internal:{{ gns3_listen_port }}
