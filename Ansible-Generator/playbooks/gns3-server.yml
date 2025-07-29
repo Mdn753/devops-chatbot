@@ -1,12 +1,12 @@
 ---
-# gns3-server.yml — install & expose GNS3 on every host in “gns3-servers”
+# gns3-server.yml — install & expose GNS3 on hosts in group “gns3-servers”
 
 - name: Install & configure a dedicated GNS3 server
   hosts: gns3-servers
   become: yes
   gather_facts: yes
   collections:
-    - community.general          # for the ufw module
+    - community.general        # for the ufw module
 
   ###################################################################
   # Tunables
@@ -15,7 +15,7 @@
     gns3_listen_host: "0.0.0.0"
     gns3_listen_port: 3080
 
-    # GNS3 PPA (Jammy build works on 22.04, skip on focal)
+    # Official GNS3 PPA signing key & repo (skip on focal)
     gns3_key_url:  "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x86C22C2EC6A24D7F"
     gns3_keyring:  /usr/share/keyrings/gns3.gpg
     gns3_repo: >-
@@ -23,25 +23,26 @@
       https://ppa.launchpadcontent.net/gns3/ppa/ubuntu
       {{ 'jammy' }} main
 
-    # Deadsnakes PPA (only for ≥ 23.10 fallback)
+    # Deadsnakes key & “jammy” pocket (for Python 3.11 on ≥ 23.10)
     deads_key_url: "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0xBA6932366A755776"
     deads_keyring: /usr/share/keyrings/deadsnakes.gpg
     deads_repo: >-
       deb [signed-by={{ deads_keyring }}]
       http://ppa.launchpad.net/deadsnakes/ppa/ubuntu
-      {{ ansible_facts.lsb.codename }} main
+      jammy main
 
     gns3_service_name: gns3server
     gns3_override_dir:  "/etc/systemd/system/{{ gns3_service_name }}.service.d"
     gns3_override_file: "{{ gns3_override_dir }}/override.conf"
 
-    gns3_venv_dir: /opt/gns3          # venv for ≥ 23.10
-    gns3_server_version: "3.0.0"
+    gns3_venv_dir: /opt/gns3
+    gns3_server_version: "3.0.0"   # pin for reproducibility
 
   ###################################################################
   # Pre-tasks
   ###################################################################
   pre_tasks:
+
     - name: Require Ubuntu 20.04 or newer
       ansible.builtin.assert:
         that:
@@ -51,7 +52,7 @@
           Only Ubuntu 20.04 LTS or newer is supported
           (found {{ ansible_facts.distribution }} {{ ansible_facts.distribution_version }}).
 
-    - name: Ensure add-apt-repository helper is installed
+    - name: Ensure add-apt-repository helper is present
       ansible.builtin.apt:
         name: software-properties-common
         state: present
@@ -61,7 +62,8 @@
   # Tasks
   ###################################################################
   tasks:
-    # ── 1 ▸ GNS3 PPA (skip on focal) ───────────────────────────────
+
+    # ── 1 ▸ GNS3 PPA (skip on 20.04/focal) ─────────────────────────
     - name: Download GNS3 signing key
       ansible.builtin.get_url:
         url: "{{ gns3_key_url }}"
@@ -83,7 +85,7 @@
         state: present
       when: ansible_facts.distribution_version != "20.04"
 
-    # ── 2 ▸ Path A — Ubuntu ≤ 22.04 (APT) ─────────────────────────
+    # ── 2 ▸ Path A — Ubuntu ≤ 22.04 (use APT packages) ─────────────
     - name: Install gns3-server + helpers from APT
       ansible.builtin.apt:
         name:
@@ -96,13 +98,13 @@
         update_cache: yes
       when: ansible_facts.distribution_version is version('23.10', '<')
 
-    # ── 3 ▸ Path B — Ubuntu ≥ 23.10 (venv) ────────────────────────
+    # ── 3 ▸ Path B — Ubuntu ≥ 23.10 (build Python 3.11 venv) ───────
     - name: Enable “universe” pocket
       ansible.builtin.command: add-apt-repository -y universe
       changed_when: false
       when: ansible_facts.distribution_version is version('23.10', '>=')
 
-    - name: Refresh APT cache
+    - name: Refresh apt cache
       ansible.builtin.apt:
         update_cache: yes
       when: ansible_facts.distribution_version is version('23.10', '>=')
@@ -112,7 +114,7 @@
         manager: auto
       when: ansible_facts.distribution_version is version('23.10', '>=')
 
-    # --- Deadsnakes fallback (key via HTTPS) -----------------------
+    # --- Deadsnakes fallback for Python 3.11 -----------------------
     - name: Download Deadsnakes signing key
       ansible.builtin.get_url:
         url: "{{ deads_key_url }}"
@@ -122,10 +124,10 @@
         - ansible_facts.distribution_version is version('23.10', '>=')
         - "'python3.11' not in (ansible_facts.packages | default({}))"
 
-    - name: Add Deadsnakes repo
+    - name: Add Deadsnakes jammy pocket
       ansible.builtin.apt_repository:
         repo: "{{ deads_repo }}"
-        filename: deadsnakes
+        filename: deadsnakes-jammy
         state: present
       when:
         - ansible_facts.distribution_version is version('23.10', '>=')
@@ -160,7 +162,7 @@
       become_user: ansible
       when: ansible_facts.distribution_version is version('23.10', '>=')
 
-    # ── 4 ▸ Systemd override (both paths) ─────────────────────────
+    # ── 4 ▸ Systemd override (works for both paths) ────────────────
     - name: Ensure override directory exists
       ansible.builtin.file:
         path: "{{ gns3_override_dir }}"
@@ -183,14 +185,14 @@
         - reload systemd
         - restart gns3
 
-    # ── 5 ▸ Enable & start service ────────────────────────────────
+    # ── 5 ▸ Enable & start service ─────────────────────────────────
     - name: Enable and start {{ gns3_service_name }}
       ansible.builtin.systemd:
         name: "{{ gns3_service_name }}"
         state: started
         enabled: yes
 
-    # ── 6 ▸ Open firewall (if UFW installed) ──────────────────────
+    # ── 6 ▸ Open firewall (if UFW installed) ───────────────────────
     - name: Allow {{ gns3_listen_port }}/tcp via UFW
       community.general.ufw:
         rule: allow
