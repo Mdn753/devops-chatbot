@@ -5,7 +5,8 @@
   hosts: gns3-servers
   become: yes
   gather_facts: yes
-
+  collections:
+    - community.general  
   ###################################################################
   # Variables (tweak these if you want a different bind address/port)
   ###################################################################

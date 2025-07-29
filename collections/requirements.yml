@@ -1,3 +1,4 @@
 collections:
   - name: community.mysql
   - name: zabbix.zabbix
+  - name: community.general
