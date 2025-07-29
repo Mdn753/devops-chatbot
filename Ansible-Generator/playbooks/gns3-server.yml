@@ -6,11 +6,11 @@
   become: yes
   gather_facts: yes
   collections:
-    - community.general          # gives us the ufw module
+    - community.general          # for the ufw module
 
-  #####################################################################
+  ###################################################################
   # Tunables
-  #####################################################################
+  ###################################################################
   vars:
     gns3_listen_host: "0.0.0.0"
     gns3_listen_port: 3080
@@ -30,9 +30,9 @@
     gns3_venv_dir: /opt/gns3
     gns3_server_version: "3.0.0"
 
-  #####################################################################
+  ###################################################################
   # Pre-tasks
-  #####################################################################
+  ###################################################################
   pre_tasks:
 
     - name: Require Ubuntu 20.04 or newer
@@ -50,39 +50,35 @@
         state: present
         update_cache: yes
 
-  #####################################################################
+  ###################################################################
   # Tasks
-  #####################################################################
+  ###################################################################
   tasks:
 
-    # ---------------------------------------------------------------
-    # Add GNS3 PPA (not needed on 20.04 focal)
-    # ---------------------------------------------------------------
-    - name: Download GNS3 signing key (skip on focal)
+    # ── Add GNS3 PPA (skip on focal) ───────────────────────────────
+    - name: Download GNS3 signing key
       ansible.builtin.get_url:
         url: "{{ gns3_key_url }}"
         dest: /tmp/gns3.asc
-        mode: '0644'
-      when: ansible_facts.distribution_version not in ['20.04']
+        mode: "0644"
+      when: ansible_facts.distribution_version != "20.04"
 
     - name: Convert key to keyring
       ansible.builtin.command:
         cmd: gpg --dearmor -o {{ gns3_keyring }} /tmp/gns3.asc
       args:
         creates: "{{ gns3_keyring }}"
-      when: ansible_facts.distribution_version not in ['20.04']
+      when: ansible_facts.distribution_version != "20.04"
 
-    - name: Add GNS3 PPA (skip on focal)
+    - name: Add GNS3 PPA repository
       ansible.builtin.apt_repository:
         repo: "{{ gns3_repo }}"
         filename: gns3
         state: present
-      when: ansible_facts.distribution_version not in ['20.04']
+      when: ansible_facts.distribution_version != "20.04"
 
-    # ---------------------------------------------------------------
-    # Path A – Ubuntu ≤ 22.04  →  install via APT
-    # ---------------------------------------------------------------
-    - name: Install gns3-server + helpers (APT path)
+    # ── Path A: Ubuntu ≤ 22.04 (install via APT) ──────────────────
+    - name: Install gns3-server + helpers from APT
       ansible.builtin.apt:
         name:
           - gns3-server
@@ -94,15 +90,13 @@
         update_cache: yes
       when: ansible_facts.distribution_version is version('23.10', '<')
 
-    # ---------------------------------------------------------------
-    # Path B – Ubuntu ≥ 23.10  →  build Python-3.11 venv
-    # ---------------------------------------------------------------
+    # ── Path B: Ubuntu ≥ 23.10 (Python 3.12) → build venv ──────────
     - name: Enable “universe” pocket
       ansible.builtin.command: add-apt-repository -y universe
       changed_when: false
       when: ansible_facts.distribution_version is version('23.10', '>=')
 
-    - name: Refresh apt cache
+    - name: Refresh APT cache
       ansible.builtin.apt:
         update_cache: yes
       when: ansible_facts.distribution_version is version('23.10', '>=')
@@ -112,7 +106,7 @@
         manager: auto
       when: ansible_facts.distribution_version is version('23.10', '>=')
 
-    - name: Add deadsnakes PPA if python3.11 still unavailable
+    - name: Add deadsnakes PPA if python3.11 is still missing
       ansible.builtin.apt_repository:
         repo: ppa:deadsnakes/ppa
         state: present
@@ -134,7 +128,7 @@
         update_cache: yes
       when: ansible_facts.distribution_version is version('23.10', '>=')
 
-    - name: Create {{ gns3_venv_dir }} venv
+    - name: Create {{ gns3_venv_dir }} virtual-env
       ansible.builtin.command: python3.11 -m venv {{ gns3_venv_dir }}
       args:
         creates: "{{ gns3_venv_dir }}/bin/activate"
@@ -149,19 +143,17 @@
       become_user: ansible
       when: ansible_facts.distribution_version is version('23.10', '>=')
 
-    # ---------------------------------------------------------------
-    # Systemd override for both paths
-    # ---------------------------------------------------------------
+    # ── Systemd override (both paths) ──────────────────────────────
     - name: Ensure override directory exists
       ansible.builtin.file:
         path: "{{ gns3_override_dir }}"
         state: directory
-        mode: '0755'
+        mode: "0755"
 
     - name: Drop ExecStart override
       ansible.builtin.copy:
         dest: "{{ gns3_override_file }}"
-        mode: '0644'
+        mode: "0644"
         content: |
           [Service]
           ExecStart=
@@ -174,32 +166,40 @@
         - reload systemd
         - restart gns3
 
-    # ---------------------------------------------------------------
-    # Enable & start service
-    # ---------------------------------------------------------------
+    # ── Enable & start service ─────────────────────────────────────
     - name: Enable and start {{ gns3_service_name }}
       ansible.builtin.systemd:
         name: "{{ gns3_service_name }}"
         state: started
         enabled: yes
 
-    # ---------------------------------------------------------------
-    # Open firewall (if ufw installed)
-    # ---------------------------------------------------------------
+    # ── Open firewall (if ufw installed) ───────────────────────────
     - name: Allow {{ gns3_listen_port }}/tcp via UFW
       community.general.ufw:
         rule: allow
         port: "{{ gns3_listen_port }}"
         proto: tcp
-      when: "'ufw' in ansible_facts.packages | default({})"
+      when: "'ufw' in (ansible_facts.packages | default({}))"
 
-  #####################################################################
+  ###################################################################
   # Handlers
-  #####################################################################
+  ###################################################################
   handlers:
     - name: reload systemd
       ansible.builtin.command: systemctl daemon-reload
 
     - name: restart gns3
       ansible.builtin.systemd:
-        name: "
+        name: "{{ gns3_service_name }}"
+        state: restarted
+        daemon_reload: false
+
+  ###################################################################
+  # Post-tasks
+  ###################################################################
+  post_tasks:
+    - ansible.builtin.debug:
+        msg: |
+          ✅ GNS3 should now be listening on {{ gns3_listen_host }}:{{ gns3_listen_port }}.
+          From Docker Desktop on Windows reach it via:
+            http://host.docker.internal:{{ gns3_listen_port }}
