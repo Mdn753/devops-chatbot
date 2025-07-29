@@ -6,7 +6,7 @@
   become: yes
   gather_facts: yes
   collections:
-    - community.general            # ufw module
+    - community.general          # gives us the ufw module
 
   ###################################################################
   # Tunables
@@ -15,7 +15,7 @@
     gns3_listen_host: "0.0.0.0"
     gns3_listen_port: 3080
 
-    # Official GNS3 PPA (skip on focal)
+    # ── GNS3 PPA (skip on focal) ───────────────────────────────────
     gns3_key_url:  "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x86C22C2EC6A24D7F"
     gns3_keyring:  /usr/share/keyrings/gns3.gpg
     gns3_repo: >-
@@ -23,18 +23,20 @@
       https://ppa.launchpadcontent.net/gns3/ppa/ubuntu
       {{ 'jammy' }} main
 
-    # Deadsnakes key + jammy pocket (for Python 3.11 on ≥ 23.10)
+    # ── Deadsnakes key & “jammy” pocket (Python 3.11 for ≥ 23.10) ──
     deads_key_url: "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0xBA6932366A755776"
     deads_keyring: /usr/share/keyrings/deadsnakes.gpg
     deads_repo: >-
-      deb [signed-by={{ deads_keyring }}]
+      deb [arch=amd64 signed-by={{ deads_keyring }}]
       http://ppa.launchpad.net/deadsnakes/ppa/ubuntu
       jammy main
 
+    # ── Service / paths ────────────────────────────────────────────
     gns3_service_name: gns3server
     gns3_override_dir:  "/etc/systemd/system/{{ gns3_service_name }}.service.d"
     gns3_override_file: "{{ gns3_override_dir }}/override.conf"
 
+    # ── Venv for ≥ 23.10 ───────────────────────────────────────────
     gns3_venv_dir: /opt/gns3
     gns3_server_version: "3.0.0"
 
@@ -42,13 +44,13 @@
   # Pre-tasks
   ###################################################################
   pre_tasks:
-    - name: Require Ubuntu 20.04 or newer
+    - name: Require Ubuntu 20.04+
       ansible.builtin.assert:
         that:
           - ansible_facts.distribution == "Ubuntu"
           - ansible_facts.distribution_version is version('20.04', '>=')
         fail_msg: >
-          Only Ubuntu 20.04 LTS or newer is supported
+          Only Ubuntu 20.04 or newer is supported
           (found {{ ansible_facts.distribution }} {{ ansible_facts.distribution_version }}).
 
     - name: Ensure add-apt-repository helper is present
@@ -97,7 +99,7 @@
         update_cache: yes
       when: ansible_facts.distribution_version is version('23.10', '<')
 
-    # ── 3 ▸ Path B — Ubuntu ≥ 23.10 (venv) ────────────────────────
+    # ── 3 ▸ Path B — Ubuntu ≥ 23.10 (build Python 3.11 venv) ──────
     - name: Enable “universe” pocket
       ansible.builtin.command: add-apt-repository -y universe
       changed_when: false
@@ -114,25 +116,16 @@
       when: ansible_facts.distribution_version is version('23.10', '>=')
 
     # --- Deadsnakes fallback for Python 3.11 -----------------------
-    - name: Download Deadsnakes ASCII key
-      ansible.builtin.get_url:
-        url: "{{ deads_key_url }}"
-        dest: /tmp/deads.asc
-        mode: "0644"
-      when:
-        - ansible_facts.distribution_version is version('23.10', '>=')
-        - "'python3.11' not in (ansible_facts.packages | default({}))"
-
-    - name: Convert Deadsnakes key to keyring
-      ansible.builtin.command:
-        cmd: gpg --dearmor -o {{ deads_keyring }} /tmp/deads.asc
+    - name: Fetch & de-armor Deadsnakes signing key
+      ansible.builtin.shell: |
+        curl -fsSL {{ deads_key_url }} | gpg --dearmor -o {{ deads_keyring }}
       args:
         creates: "{{ deads_keyring }}"
       when:
         - ansible_facts.distribution_version is version('23.10', '>=')
         - "'python3.11' not in (ansible_facts.packages | default({}))"
 
-    - name: Add Deadsnakes jammy pocket
+    - name: Add Deadsnakes “jammy” pocket
       ansible.builtin.apt_repository:
         repo: "{{ deads_repo }}"
         filename: deadsnakes-jammy
@@ -228,5 +221,5 @@
     - ansible.builtin.debug:
         msg: |
           ✅ GNS3 should now be listening on {{ gns3_listen_host }}:{{ gns3_listen_port }}.
-          From Docker Desktop on Windows reach it at:
+          From Docker Desktop on Windows reach it via:
             http://host.docker.internal:{{ gns3_listen_port }}
