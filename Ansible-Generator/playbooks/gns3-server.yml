@@ -1,12 +1,12 @@
 ---
-# gns3-server.yml — install & expose GNS3 on every host in “gns3-servers”
+# gns3-server.yml — install & expose GNS3 on all hosts in inventory group “gns3-servers”
 
 - name: Install & configure a dedicated GNS3 server
   hosts: gns3-servers
   become: yes
   gather_facts: yes
   collections:
-    - community.general          # gives us the ufw module
+    - community.general          # provides the ufw module
 
   ###################################################################
   # Tunables
@@ -15,7 +15,7 @@
     gns3_listen_host: "0.0.0.0"
     gns3_listen_port: 3080
 
-    # ── GNS3 PPA (skip on focal) ───────────────────────────────────
+    # GNS3 PPA (skip on focal)
     gns3_key_url:  "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x86C22C2EC6A24D7F"
     gns3_keyring:  /usr/share/keyrings/gns3.gpg
     gns3_repo: >-
@@ -23,21 +23,19 @@
       https://ppa.launchpadcontent.net/gns3/ppa/ubuntu
       {{ 'jammy' }} main
 
-    # ── Deadsnakes key & “jammy” pocket (Python 3.11 for ≥ 23.10) ──
+    # Deadsnakes key + “jammy” pocket (Python 3.11 for ≥ 23.10)
     deads_key_url: "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0xBA6932366A755776"
-    deads_keyring: /usr/share/keyrings/deadsnakes.gpg
+    deads_keyring:  /usr/share/keyrings/deadsnakes.gpg
     deads_repo: >-
       deb [arch=amd64 signed-by={{ deads_keyring }}]
       http://ppa.launchpad.net/deadsnakes/ppa/ubuntu
       jammy main
 
-    # ── Service / paths ────────────────────────────────────────────
+    # Service & venv
     gns3_service_name: gns3server
     gns3_override_dir:  "/etc/systemd/system/{{ gns3_service_name }}.service.d"
     gns3_override_file: "{{ gns3_override_dir }}/override.conf"
-
-    # ── Venv for ≥ 23.10 ───────────────────────────────────────────
-    gns3_venv_dir: /opt/gns3
+    gns3_venv_dir: /opt/gns3       # used on Ubuntu ≥ 23.10
     gns3_server_version: "3.0.0"
 
   ###################################################################
@@ -53,7 +51,7 @@
           Only Ubuntu 20.04 or newer is supported
           (found {{ ansible_facts.distribution }} {{ ansible_facts.distribution_version }}).
 
-    - name: Ensure add-apt-repository helper is present
+    - name: Ensure add-apt-repository helper is installed
       ansible.builtin.apt:
         name: software-properties-common
         state: present
@@ -64,19 +62,12 @@
   ###################################################################
   tasks:
 
-    # ── 1 ▸ GNS3 PPA (skip on focal) ───────────────────────────────
-    - name: Download GNS3 signing key
-      ansible.builtin.get_url:
+    # ── 1 ▸ GNS3 PPA (skip on 20.04/focal) ─────────────────────────
+    - name: Add GNS3 signing key
+      ansible.builtin.apt_key:
         url: "{{ gns3_key_url }}"
-        dest: /tmp/gns3.asc
-        mode: "0644"
-      when: ansible_facts.distribution_version != "20.04"
-
-    - name: Convert GNS3 key to keyring
-      ansible.builtin.command:
-        cmd: gpg --dearmor -o {{ gns3_keyring }} /tmp/gns3.asc
-      args:
-        creates: "{{ gns3_keyring }}"
+        keyring: "{{ gns3_keyring }}"
+        state: present
       when: ansible_facts.distribution_version != "20.04"
 
     - name: Add GNS3 PPA
@@ -115,12 +106,12 @@
         manager: auto
       when: ansible_facts.distribution_version is version('23.10', '>=')
 
-    # --- Deadsnakes fallback for Python 3.11 -----------------------
-    - name: Fetch & de-armor Deadsnakes signing key
-      ansible.builtin.shell: |
-        curl -fsSL {{ deads_key_url }} | gpg --dearmor -o {{ deads_keyring }}
-      args:
-        creates: "{{ deads_keyring }}"
+    # --- Deadsnakes Python 3.11 fallback ---------------------------
+    - name: Add Deadsnakes signing key
+      ansible.builtin.apt_key:
+        url: "{{ deads_key_url }}"
+        keyring: "{{ deads_keyring }}"
+        state: present
       when:
         - ansible_facts.distribution_version is version('23.10', '>=')
         - "'python3.11' not in (ansible_facts.packages | default({}))"
