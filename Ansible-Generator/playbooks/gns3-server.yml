@@ -1,12 +1,12 @@
 ---
-# gns3-server.yml — install & expose GNS3 on all hosts in group “gns3-servers”
+# gns3-server.yml — install & expose GNS3 on all hosts in “gns3-servers”
 
 - name: Install & configure a dedicated GNS3 server
   hosts: gns3-servers
   become: yes
   gather_facts: yes
   collections:
-    - community.general          # → ufw module
+    - community.general          # gives us the ufw module
 
   #####################################################################
   # Tunables
@@ -15,20 +15,20 @@
     gns3_listen_host: "0.0.0.0"
     gns3_listen_port: 3080
 
-    gns3_key_url: "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x86C22C2EC6A24D7F"
+    gns3_key_url:  "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x86C22C2EC6A24D7F"
     gns3_keyring:  /usr/share/keyrings/gns3.gpg
     gns3_repo: >-
       deb [signed-by={{ gns3_keyring }}]
       https://ppa.launchpadcontent.net/gns3/ppa/ubuntu
-      {{ 'jammy' }} main                # works on 22.04; skip on 20.04
+      {{ 'jammy' }} main
 
     gns3_service_name: gns3server
     gns3_override_dir:  "/etc/systemd/system/{{ gns3_service_name }}.service.d"
     gns3_override_file: "{{ gns3_override_dir }}/override.conf"
 
-    # venv parameters for Ubuntu ≥ 23.10
+    # venv path for Ubuntu ≥ 23.10
     gns3_venv_dir: /opt/gns3
-    gns3_server_version: "3.0.0"        # pin for reproducibility
+    gns3_server_version: "3.0.0"
 
   #####################################################################
   # Pre-tasks
@@ -51,11 +51,14 @@
         update_cache: yes
 
   #####################################################################
-  # Add the official GNS3 PPA  (22.04 path)
+  # Tasks
   #####################################################################
   tasks:
 
-    - name: Download GNS3 signing key   # not needed on 20.04
+    # ---------------------------------------------------------------
+    # Add GNS3 PPA (not needed on 20.04 focal)
+    # ---------------------------------------------------------------
+    - name: Download GNS3 signing key (skip on focal)
       ansible.builtin.get_url:
         url: "{{ gns3_key_url }}"
         dest: /tmp/gns3.asc
@@ -69,17 +72,17 @@
         creates: "{{ gns3_keyring }}"
       when: ansible_facts.distribution_version not in ['20.04']
 
-    - name: Add GNS3 Jammy PPA (skipped on 20.04)
+    - name: Add GNS3 PPA (skip on focal)
       ansible.builtin.apt_repository:
         repo: "{{ gns3_repo }}"
         filename: gns3
         state: present
       when: ansible_facts.distribution_version not in ['20.04']
 
-  #####################################################################
-  # Branch: ≤ 22.04  →  install via APT
-  #####################################################################
-    - name: Install gns3-server + helpers from APT   # focal & jammy path
+    # ---------------------------------------------------------------
+    # Path A – Ubuntu ≤ 22.04  →  install via APT
+    # ---------------------------------------------------------------
+    - name: Install gns3-server + helpers (APT path)
       ansible.builtin.apt:
         name:
           - gns3-server
@@ -91,17 +94,22 @@
         update_cache: yes
       when: ansible_facts.distribution_version is version('23.10', '<')
 
-  #####################################################################
-  # Branch: ≥ 23.10  →  build Python-3.11 venv
-  #####################################################################
-    - name: Enable universe pocket
+    # ---------------------------------------------------------------
+    # Path B – Ubuntu ≥ 23.10  →  build Python-3.11 venv
+    # ---------------------------------------------------------------
+    - name: Enable “universe” pocket
       ansible.builtin.command: add-apt-repository -y universe
       changed_when: false
       when: ansible_facts.distribution_version is version('23.10', '>=')
 
-    - name: Refresh apt cache after enabling universe
+    - name: Refresh apt cache
       ansible.builtin.apt:
         update_cache: yes
+      when: ansible_facts.distribution_version is version('23.10', '>=')
+
+    - name: Gather installed package facts
+      ansible.builtin.package_facts:
+        manager: auto
       when: ansible_facts.distribution_version is version('23.10', '>=')
 
     - name: Add deadsnakes PPA if python3.11 still unavailable
@@ -110,7 +118,7 @@
         state: present
       when:
         - ansible_facts.distribution_version is version('23.10', '>=')
-        - "'python3.11' not in ansible_facts.packages"
+        - "'python3.11' not in (ansible_facts.packages | default({}))"
 
     - name: Install python3.11, venv & build deps
       ansible.builtin.apt:
@@ -141,16 +149,16 @@
       become_user: ansible
       when: ansible_facts.distribution_version is version('23.10', '>=')
 
-  #####################################################################
-  # Systemd override (works for both branches)
-  #####################################################################
+    # ---------------------------------------------------------------
+    # Systemd override for both paths
+    # ---------------------------------------------------------------
     - name: Ensure override directory exists
       ansible.builtin.file:
         path: "{{ gns3_override_dir }}"
         state: directory
         mode: '0755'
 
-    - name: Drop ExecStart override with correct binary
+    - name: Drop ExecStart override
       ansible.builtin.copy:
         dest: "{{ gns3_override_file }}"
         mode: '0644'
@@ -166,24 +174,24 @@
         - reload systemd
         - restart gns3
 
-  #####################################################################
-  # Enable & start service
-  #####################################################################
+    # ---------------------------------------------------------------
+    # Enable & start service
+    # ---------------------------------------------------------------
     - name: Enable and start {{ gns3_service_name }}
       ansible.builtin.systemd:
         name: "{{ gns3_service_name }}"
         state: started
         enabled: yes
 
-  #####################################################################
-  # Open firewall (optional)
-  #####################################################################
-    - name: Allow {{ gns3_listen_port }}/tcp via UFW (if installed)
+    # ---------------------------------------------------------------
+    # Open firewall (if ufw installed)
+    # ---------------------------------------------------------------
+    - name: Allow {{ gns3_listen_port }}/tcp via UFW
       community.general.ufw:
         rule: allow
         port: "{{ gns3_listen_port }}"
         proto: tcp
-      when: "'ufw' in ansible_facts.packages"
+      when: "'ufw' in ansible_facts.packages | default({})"
 
   #####################################################################
   # Handlers
@@ -194,16 +202,4 @@
 
     - name: restart gns3
       ansible.builtin.systemd:
-        name: "{{ gns3_service_name }}"
-        state: restarted
-        daemon_reload: false
-
-  #####################################################################
-  # Post-tasks
-  #####################################################################
-  post_tasks:
-    - ansible.builtin.debug:
-        msg: |
-          ✅ GNS3 should now be listening on {{ gns3_listen_host }}:{{ gns3_listen_port }}.
-          From Docker Desktop on Windows reach it at:
-            http://host.docker.internal:{{ gns3_listen_port }}
+        name: "
