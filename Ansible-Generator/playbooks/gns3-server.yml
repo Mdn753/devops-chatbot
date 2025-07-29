@@ -14,16 +14,19 @@
     gns3_listen_port: 3080
 
     gns3_key_url: "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x86C22C2EC6A24D7F"
-    gns3_keyring: /usr/share/keyrings/gns3.gpg
+    gns3_keyring:  /usr/share/keyrings/gns3.gpg
     gns3_repo: >-
       deb [signed-by={{ gns3_keyring }}]
       https://ppa.launchpadcontent.net/gns3/ppa/ubuntu
       {{ 'jammy' }} main            # jammy builds run fine on 24.04, skip on 20.04
-    gns3_unit_path_pkg:  "/lib/systemd/system/gns3.service"
-    gns3_unit_path_local: "/etc/systemd/system/gns3.service"
+
+    # –– the correct unit shipped by the package ––
+    gns3_service_name: gns3server               # <-- main change
+    gns3_unit_path_pkg:  "/lib/systemd/system/{{ gns3_service_name }}.service"
+    gns3_unit_path_local: "/etc/systemd/system/{{ gns3_service_name }}.service"
 
   ###################################################################
-  # Pre-tasks: basic host sanity
+  # Pre-tasks: sanity checks
   ###################################################################
   pre_tasks:
     - name: Allow only Ubuntu ≥ 20.04
@@ -98,14 +101,14 @@
 
     - name: Ensure override directory exists (when distro unit present)
       ansible.builtin.file:
-        path: /etc/systemd/system/gns3.service.d
+        path: "/etc/systemd/system/{{ gns3_service_name }}.service.d"
         state: directory
         mode: '0755'
       when: pkg_unit.stat.exists
 
     - name: Drop override to bind on {{ gns3_listen_host }}:{{ gns3_listen_port }}
       ansible.builtin.copy:
-        dest: /etc/systemd/system/gns3.service.d/override.conf
+        dest: "/etc/systemd/system/{{ gns3_service_name }}.service.d/override.conf"
         mode: '0644'
         content: |
           [Service]
@@ -116,7 +119,7 @@
         - reload systemd
         - restart gns3
 
-    - name: Create custom gns3.service when no distro unit
+    - name: Create custom {{ gns3_service_name }}.service when no distro unit
       ansible.builtin.copy:
         dest: "{{ gns3_unit_path_local }}"
         mode: '0644'
@@ -140,11 +143,19 @@
         - reload systemd
 
     # -- 4 ▸ Enable & start service ---------------------------------
-    - name: Enable and start gns3 service
+    - name: Enable and start gns3server service
       ansible.builtin.systemd:
-        name: gns3
+        name: "{{ gns3_service_name }}"
         state: started
         enabled: yes
+
+    # -- 5 ▸ Open firewall port (ufw) -------------------------------
+    - name: Open port {{ gns3_listen_port }} in ufw
+      ansible.builtin.ufw:
+        rule: allow
+        port: "{{ gns3_listen_port }}"
+        proto: tcp
+      when: ansible_facts.packages.ufw is defined
 
   ###################################################################
   # Handlers
@@ -155,7 +166,7 @@
 
     - name: restart gns3
       ansible.builtin.systemd:
-        name: gns3
+        name: "{{ gns3_service_name }}"
         state: restarted
         daemon_reload: false
 
@@ -165,5 +176,5 @@
   post_tasks:
     - ansible.builtin.debug:
         msg: >
-          ✅ GNS3 is listening on {{ gns3_listen_host }}:{{ gns3_listen_port }}.
-          Access it from containers via http://host.docker.internal:{{ gns3_listen_port }}
+          ✅ GNS3 should now be listening on {{ gns3_listen_host }}:{{ gns3_listen_port }}.
+          Access it from Docker containers via http://host.docker.internal:{{ gns3_listen_port }}
