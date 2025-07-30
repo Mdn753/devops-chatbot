@@ -1,72 +1,48 @@
 ---
-# gns3-server.yml — Install & expose GNS3-server (Plucky, Noble, Jammy …)
-# Run: ansible-playbook -i inventory.ini gns3-server.yml
+# gns3-server.yml — Install & expose a dedicated GNS3-server
+# Tested on Ubuntu 22.04 → 25.04 (“Plucky”) and Debian-based guests
+#
+#   $ ansible-playbook -i inventory.ini gns3-server.yml
+#
+# Inventory group expected:  gns3-servers
 
-- name: Install & configure GNS3-server
+- name: Install and configure GNS3-server
   hosts: gns3-servers
   become: yes
   gather_facts: yes
 
+  #############################################################################
+  # ─────────────────────────  Adjustable variables  ─────────────────────────
+  #############################################################################
   vars:
-    # ── PPA signing keys ─────────────────────────────────────────────
-    gns3_keys:
-      - 86C22C2EC6A24D7F        # “Launchpad PPA for GNS3” (historical)
-      - 9A2FD067A2E3EF7B        # additional key used since 2024-10
-    gns3_keyring: /usr/share/keyrings/gns3.gpg
-    gns3_repo: >-
-      deb [arch=amd64 signed-by={{ gns3_keyring }}]
-      https://ppa.launchpadcontent.net/gns3/ppa/ubuntu
-      {{ ansible_distribution_release }} main
+    gns3_host:    "0.0.0.0"     # expose REST API on all interfaces
+    gns3_port:    3080
+    gns3_user:    gns3          # dedicated non-login account
+    gns3_service: gns3          # systemd unit name
 
-    # ── Server settings ──────────────────────────────────────────────
-    gns3_host:   "0.0.0.0"        # expose REST API
-    gns3_port:   3080
-    gns3_user:   gns3
-    gns3_service: gns3
-
+  #############################################################################
+  # ──────────────────────────────  Play steps  ───────────────────────────────
+  #############################################################################
   tasks:
-    - name: Install basic tools
+    # ------------------------------------------------------------------ tools
+    - name: Install base packages we need (curl, add-apt-repository, etc.)
       apt:
-        name: [curl, gnupg, software-properties-common]
+        name:
+          - curl
+          - gnupg
+          - software-properties-common   # brings add-apt-repository
         state: present
         update_cache: yes
 
-    # --- keyring ----------------------------------------------------
-    - name: Remove any previous (possibly armoured) keyring
-      file:
-        path: "{{ gns3_keyring }}"
-        state: absent
-
-    - name: Download & de-armour BOTH PPA keys into one binary keyring
-      shell: |
-        set -e
-        tmp=$(mktemp)
-        for key in {{ gns3_keys|join(' ') }}; do
-          curl -fsSL "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x${key}" >> "$tmp"
-        done
-        gpg --dearmor --yes --output "{{ gns3_keyring }}" "$tmp"
-        rm "$tmp"
-      args:
-        warn: false
-      changed_when: true
-
-    - name: Correct permissions on keyring
-      file:
-        path: "{{ gns3_keyring }}"
-        owner: root
-        group: root
-        mode: '0644'
-
-    # --- repository -------------------------------------------------
-    - name: Add GNS3 Launchpad PPA
+    # ------------------------------------------------------ add Launchpad PPA
+    - name: Add official GNS3 PPA (handles key import automatically)
       apt_repository:
-        repo: "{{ gns3_repo }}"
-        filename: gns3
+        repo: "ppa:gns3/ppa"
         state: present
         update_cache: yes
 
-    # --- packages ---------------------------------------------------
-    - name: Install GNS3-server and helpers
+    # -------------------------------------------------------- install server
+    - name: Install gns3-server and helper binaries
       apt:
         name:
           - gns3-server
@@ -77,12 +53,14 @@
         state: present
         update_cache: yes
 
+    # -------------------------------------------------------- service account
     - name: Create dedicated service account
       user:
         name: "{{ gns3_user }}"
         system: yes
         shell: /usr/sbin/nologin
 
+    # ----------------------------------------------------- main config file
     - name: Deploy /etc/gns3/gns3_server.conf
       copy:
         dest: /etc/gns3/gns3_server.conf
@@ -101,13 +79,13 @@
           enable_kvm = True
       notify: Restart gns3-server
 
-    # systemd unit (only if package didn’t ship one)
-    - name: Ensure systemd unit exists
+    # -------------------------------------------------- systemd service file
+    - name: Ensure systemd unit exists (package ships one on recent releases)
       stat:
         path: /etc/systemd/system/{{ gns3_service }}.service
-      register: unit
+      register: unit_file
 
-    - name: Install minimal systemd unit
+    - name: Provide minimal systemd unit (only if missing)
       copy:
         dest: /etc/systemd/system/{{ gns3_service }}.service
         mode: '0644'
@@ -125,15 +103,17 @@
 
           [Install]
           WantedBy=multi-user.target
-      when: not unit.stat.exists
+      when: not unit_file.stat.exists
       notify: Reload systemd
 
-    - name: Enable & start GNS3 service
+    # ------------------------------------------------------- enable & start
+    - name: Enable and start gns3-server service
       service:
         name: "{{ gns3_service }}"
         state: started
         enabled: yes
 
+    # ---------------------------------------------------- optional firewall
     - name: (Optional) open REST API port with UFW
       ufw:
         rule: allow
@@ -141,6 +121,9 @@
         proto: tcp
       when: "'ufw' in ansible_facts.packages"
 
+  #############################################################################
+  # ──────────────────────────────  Handlers  ────────────────────────────────
+  #############################################################################
   handlers:
     - name: Reload systemd
       command: systemctl daemon-reload
