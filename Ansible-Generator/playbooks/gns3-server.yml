@@ -1,138 +1,146 @@
 ---
-# gns3-server.yml — Install & expose a dedicated GNS3-server
-# Runs on: hosts: gns3-servers  (Ubuntu 20.04 / 22.04 or Debian-based)
+# gns3-server.yml — Install & expose GNS3-server (Plucky, Noble, Jammy …)
+# Run: ansible-playbook -i inventory.ini gns3-server.yml
 
 - name: Install & configure GNS3-server
   hosts: gns3-servers
   become: yes
   gather_facts: yes
 
-  ###################################################################
-  # Variables — override as needed
-  ###################################################################
   vars:
-    gns3_key_id:  "86C22C2EC6A24D7F"    # official GNS3 PPA key
-    gns3_key_url: "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x{{ gns3_key_id }}"
-    gns3_keyring: "/usr/share/keyrings/gns3.gpg"
-    gns3_repo:    "deb [arch=amd64 signed-by={{ gns3_keyring }}] https://ppa.launchpadcontent.net/gns3/ppa/ubuntu {{ ansible_distribution_release }} main"
+    # ── PPA signing keys ─────────────────────────────────────────────
+    gns3_keys:
+      - 86C22C2EC6A24D7F        # “Launchpad PPA for GNS3” (historical)
+      - 9A2FD067A2E3EF7B        # additional key used since 2024-10
+    gns3_keyring: /usr/share/keyrings/gns3.gpg
+    gns3_repo: >-
+      deb [arch=amd64 signed-by={{ gns3_keyring }}]
+      https://ppa.launchpadcontent.net/gns3/ppa/ubuntu
+      {{ ansible_distribution_release }} main
 
-    gns3_host:   "0.0.0.0"   # bind REST API to all interfaces
+    # ── Server settings ──────────────────────────────────────────────
+    gns3_host:   "0.0.0.0"        # expose REST API
     gns3_port:   3080
-    gns3_user:   gns3        # non-privileged service account
-    gns3_service: gns3       # systemd unit name
+    gns3_user:   gns3
+    gns3_service: gns3
 
-  ###################################################################
-  # Tasks
-  ###################################################################
   tasks:
+    - name: Install basic tools
+      apt:
+        name: [curl, gnupg, software-properties-common]
+        state: present
+        update_cache: yes
 
-  - name: Install prerequisites
-    apt:
-      name:
-        - curl
-        - gnupg
-        - software-properties-common
-      state: present
-      update_cache: yes
+    # --- keyring ----------------------------------------------------
+    - name: Remove any previous (possibly armoured) keyring
+      file:
+        path: "{{ gns3_keyring }}"
+        state: absent
 
-  - name: Download and de-armor GNS3 PPA key
-    shell: |
-      set -e
-      curl -fsSL "{{ gns3_key_url }}" | gpg --dearmor --yes -o "{{ gns3_keyring }}"
-    args:
-      creates: "{{ gns3_keyring }}"
+    - name: Download & de-armour BOTH PPA keys into one binary keyring
+      shell: |
+        set -e
+        tmp=$(mktemp)
+        for key in {{ gns3_keys|join(' ') }}; do
+          curl -fsSL "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x${key}" >> "$tmp"
+        done
+        gpg --dearmor --yes --output "{{ gns3_keyring }}" "$tmp"
+        rm "$tmp"
+      args:
+        warn: false
+      changed_when: true
 
-  - name: Ensure correct permissions on keyring
-    file:
-      path: "{{ gns3_keyring }}"
-      owner: root
-      group: root
-      mode: '0644'
+    - name: Correct permissions on keyring
+      file:
+        path: "{{ gns3_keyring }}"
+        owner: root
+        group: root
+        mode: '0644'
 
-  - name: Add GNS3 Launchpad PPA
-    apt_repository:
-      repo: "{{ gns3_repo }}"
-      filename: gns3
-      state: present
-      update_cache: yes
+    # --- repository -------------------------------------------------
+    - name: Add GNS3 Launchpad PPA
+      apt_repository:
+        repo: "{{ gns3_repo }}"
+        filename: gns3
+        state: present
+        update_cache: yes
 
-  - name: Install GNS3-server and helpers
-    apt:
-      name:
-        - gns3-server
-        - ubridge
-        - dynamips
-        - qemu-kvm
-        - vpcs
-      state: present
-      update_cache: yes
+    # --- packages ---------------------------------------------------
+    - name: Install GNS3-server and helpers
+      apt:
+        name:
+          - gns3-server
+          - ubridge
+          - dynamips
+          - qemu-kvm
+          - vpcs
+        state: present
+        update_cache: yes
 
-  - name: Create dedicated service account
-    user:
-      name: "{{ gns3_user }}"
-      system: yes
-      shell: /usr/sbin/nologin
+    - name: Create dedicated service account
+      user:
+        name: "{{ gns3_user }}"
+        system: yes
+        shell: /usr/sbin/nologin
 
-  - name: Deploy /etc/gns3/gns3_server.conf
-    copy:
-      dest: /etc/gns3/gns3_server.conf
-      owner: "{{ gns3_user }}"
-      group: "{{ gns3_user }}"
-      mode: '0644'
-      content: |
-        [Server]
-        host = {{ gns3_host }}
-        port = {{ gns3_port }}
-        auth = False
-        console_start_port_range = 5000
-        console_end_port_range   = 5010
+    - name: Deploy /etc/gns3/gns3_server.conf
+      copy:
+        dest: /etc/gns3/gns3_server.conf
+        owner: "{{ gns3_user }}"
+        group: "{{ gns3_user }}"
+        mode: '0644'
+        content: |
+          [Server]
+          host = {{ gns3_host }}
+          port = {{ gns3_port }}
+          auth = False
+          console_start_port_range = 5000
+          console_end_port_range   = 5010
 
-        [Qemu]
-        enable_kvm = True
-    notify: Restart gns3-server
+          [Qemu]
+          enable_kvm = True
+      notify: Restart gns3-server
 
-  - name: Check if systemd unit already exists
-    stat:
-      path: /etc/systemd/system/{{ gns3_service }}.service
-    register: gns3_unit_file
+    # systemd unit (only if package didn’t ship one)
+    - name: Ensure systemd unit exists
+      stat:
+        path: /etc/systemd/system/{{ gns3_service }}.service
+      register: unit
 
-  - name: Install minimal systemd unit
-    copy:
-      dest: /etc/systemd/system/{{ gns3_service }}.service
-      mode: '0644'
-      content: |
-        [Unit]
-        Description=GNS3 Server
-        Wants=network-online.target
-        After=network-online.target
+    - name: Install minimal systemd unit
+      copy:
+        dest: /etc/systemd/system/{{ gns3_service }}.service
+        mode: '0644'
+        content: |
+          [Unit]
+          Description=GNS3 Server
+          Wants=network-online.target
+          After=network-online.target
 
-        [Service]
-        User={{ gns3_user }}
-        Group={{ gns3_user }}
-        ExecStart=/usr/bin/gns3server --config /etc/gns3/gns3_server.conf
-        Restart=on-failure
+          [Service]
+          User={{ gns3_user }}
+          Group={{ gns3_user }}
+          ExecStart=/usr/bin/gns3server --config /etc/gns3/gns3_server.conf
+          Restart=on-failure
 
-        [Install]
-        WantedBy=multi-user.target
-    when: not gns3_unit_file.stat.exists
-    notify: Reload systemd
+          [Install]
+          WantedBy=multi-user.target
+      when: not unit.stat.exists
+      notify: Reload systemd
 
-  - name: Enable & start GNS3 service
-    service:
-      name: "{{ gns3_service }}"
-      state: started
-      enabled: yes
+    - name: Enable & start GNS3 service
+      service:
+        name: "{{ gns3_service }}"
+        state: started
+        enabled: yes
 
-  - name: (Optional) Allow REST API through UFW
-    ufw:
-      rule: allow
-      port: "{{ gns3_port }}"
-      proto: tcp
-    when: "'ufw' in ansible_facts.packages"
+    - name: (Optional) open REST API port with UFW
+      ufw:
+        rule: allow
+        port: "{{ gns3_port }}"
+        proto: tcp
+      when: "'ufw' in ansible_facts.packages"
 
-  ###################################################################
-  # Handlers
-  ###################################################################
   handlers:
     - name: Reload systemd
       command: systemctl daemon-reload
