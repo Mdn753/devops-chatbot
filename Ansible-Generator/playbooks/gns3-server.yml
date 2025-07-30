@@ -24,6 +24,19 @@
   # ──────────────────────────────  Play steps  ───────────────────────────────
   #############################################################################
   tasks:
+    # ------------------------------------------ wait for automatic updates
+    - name: Wait for automatic system updates to complete
+      shell: while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do sleep 5; done
+      changed_when: false
+
+    - name: Wait for unattended-upgrades to finish
+      shell: |
+        while pgrep -x unattended-upgr >/dev/null; do
+          echo "Waiting for unattended-upgrades to finish..."
+          sleep 30
+        done
+      changed_when: false
+
     # ------------------------------------------------------------------ tools
     - name: Install base packages we need (curl, add-apt-repository, etc.)
       apt:
@@ -35,6 +48,7 @@
           - apt-transport-https
         state: present
         update_cache: yes
+        lock_timeout: 300
 
     # ------------------------------------------------ manually add GPG keys
     - name: Create GNS3 keyring directory
@@ -83,6 +97,7 @@
     - name: Update apt cache after adding repository
       apt:
         update_cache: yes
+        lock_timeout: 300
       when: not use_jammy_fallback
 
     # -------------------------------------------------------- install server
@@ -96,6 +111,7 @@
           - vpcs
         state: present
         update_cache: yes
+        lock_timeout: 300
 
     # ----------------------------------------------- add user to kvm group
     - name: Add gns3 user to kvm group for hardware acceleration
