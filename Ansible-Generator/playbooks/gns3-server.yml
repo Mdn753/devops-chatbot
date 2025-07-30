@@ -1,6 +1,6 @@
 ---
 # gns3-server.yml — Install & expose a dedicated GNS3-server
-# Tested on Ubuntu 22.04 → 25.04 (“Plucky”) and Debian-based guests
+# Tested on Ubuntu 22.04 → 25.04 ("Plucky") and Debian-based guests
 #
 #   $ ansible-playbook -i inventory.ini gns3-server.yml
 #
@@ -31,15 +31,59 @@
           - curl
           - gnupg
           - software-properties-common   # brings add-apt-repository
+          - wget
+          - apt-transport-https
         state: present
         update_cache: yes
 
-    # ------------------------------------------------------ add Launchpad PPA
-    - name: Add official GNS3 PPA (handles key import automatically)
+    # ------------------------------------------------ manually add GPG keys
+    - name: Create GNS3 keyring directory
+      file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: '0755'
+
+    - name: Download and add GNS3 PPA GPG key
+      shell: |
+        curl -fsSL https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x86C22C2EC6A24D7F | gpg --dearmor -o /etc/apt/keyrings/gns3-ppa.gpg
+        curl -fsSL https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x9A2FD067A2E3EF7B | gpg --dearmor -o /etc/apt/keyrings/gns3-ppa2.gpg
+      args:
+        creates: /etc/apt/keyrings/gns3-ppa.gpg
+
+    # ------------------------------------------------------ add repository manually
+    - name: Add GNS3 PPA repository with proper key reference
       apt_repository:
-        repo: "ppa:gns3/ppa"
+        repo: "deb [signed-by=/etc/apt/keyrings/gns3-ppa.gpg] http://ppa.launchpad.net/gns3/ppa/ubuntu {{ ansible_distribution_release }} main"
         state: present
+        filename: gns3-ppa
+        update_cache: no
+
+    # ------------------------------------------------ fallback for newer Ubuntu
+    - name: Check if we're on Ubuntu 25.04+ (use jammy packages as fallback)
+      set_fact:
+        use_jammy_fallback: "{{ ansible_distribution == 'Ubuntu' and ansible_distribution_version is version('25.04', '>=') }}"
+
+    - name: Add GNS3 PPA with jammy fallback for newer Ubuntu versions
+      apt_repository:
+        repo: "deb [signed-by=/etc/apt/keyrings/gns3-ppa.gpg] http://ppa.launchpad.net/gns3/ppa/ubuntu jammy main"
+        state: present
+        filename: gns3-ppa-jammy
         update_cache: yes
+        mode: '0644'
+      when: use_jammy_fallback
+
+    - name: Remove original PPA entry if using jammy fallback
+      apt_repository:
+        repo: "deb [signed-by=/etc/apt/keyrings/gns3-ppa.gpg] http://ppa.launchpad.net/gns3/ppa/ubuntu {{ ansible_distribution_release }} main"
+        state: absent
+        filename: gns3-ppa
+      when: use_jammy_fallback
+
+    # ------------------------------------------ update cache after key setup
+    - name: Update apt cache after adding repository
+      apt:
+        update_cache: yes
+      when: not use_jammy_fallback
 
     # -------------------------------------------------------- install server
     - name: Install gns3-server and helper binaries
@@ -53,12 +97,31 @@
         state: present
         update_cache: yes
 
+    # ----------------------------------------------- add user to kvm group
+    - name: Add gns3 user to kvm group for hardware acceleration
+      user:
+        name: "{{ gns3_user }}"
+        groups: kvm
+        append: yes
+      notify: Restart gns3-server
+
     # -------------------------------------------------------- service account
     - name: Create dedicated service account
       user:
         name: "{{ gns3_user }}"
         system: yes
         shell: /usr/sbin/nologin
+        create_home: yes
+        home: /opt/gns3
+
+    # ---------------------------------------------------- create config dir
+    - name: Create GNS3 configuration directory
+      file:
+        path: /etc/gns3
+        state: directory
+        owner: "{{ gns3_user }}"
+        group: "{{ gns3_user }}"
+        mode: '0755'
 
     # ----------------------------------------------------- main config file
     - name: Deploy /etc/gns3/gns3_server.conf
@@ -72,20 +135,37 @@
           host = {{ gns3_host }}
           port = {{ gns3_port }}
           auth = False
+          cors = True
           console_start_port_range = 5000
           console_end_port_range   = 5010
+          images_path = /opt/gns3/images
+          projects_path = /opt/gns3/projects
 
           [Qemu]
           enable_kvm = True
+          require_kvm = False
       notify: Restart gns3-server
 
+    # ----------------------------------------------- create working directories
+    - name: Create GNS3 working directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ gns3_user }}"
+        group: "{{ gns3_user }}"
+        mode: '0755'
+      loop:
+        - /opt/gns3/images
+        - /opt/gns3/projects
+        - /opt/gns3/configs
+
     # -------------------------------------------------- systemd service file
-    - name: Ensure systemd unit exists (package ships one on recent releases)
+    - name: Check if systemd unit exists
       stat:
         path: /etc/systemd/system/{{ gns3_service }}.service
       register: unit_file
 
-    - name: Provide minimal systemd unit (only if missing)
+    - name: Create systemd unit file
       copy:
         dest: /etc/systemd/system/{{ gns3_service }}.service
         mode: '0644'
@@ -98,13 +178,26 @@
           [Service]
           User={{ gns3_user }}
           Group={{ gns3_user }}
-          ExecStart=/usr/bin/gns3server --config /etc/gns3/gns3_server.conf
+          ExecStart=/usr/bin/gns3server --config /etc/gns3/gns3_server.conf --log /var/log/gns3/gns3.log
           Restart=on-failure
+          RestartSec=5
+          Environment=HOME=/opt/gns3
 
           [Install]
           WantedBy=multi-user.target
       when: not unit_file.stat.exists
-      notify: Reload systemd
+      notify: 
+        - Reload systemd
+        - Restart gns3-server
+
+    # --------------------------------------------------- create log directory
+    - name: Create GNS3 log directory
+      file:
+        path: /var/log/gns3
+        state: directory
+        owner: "{{ gns3_user }}"
+        group: "{{ gns3_user }}"
+        mode: '0755'
 
     # ------------------------------------------------------- enable & start
     - name: Enable and start gns3-server service
@@ -114,12 +207,47 @@
         enabled: yes
 
     # ---------------------------------------------------- optional firewall
-    - name: (Optional) open REST API port with UFW
+    - name: Check if UFW is installed
+      command: which ufw
+      register: ufw_check
+      failed_when: false
+      changed_when: false
+
+    - name: Open REST API port with UFW
       ufw:
         rule: allow
         port: "{{ gns3_port }}"
         proto: tcp
-      when: "'ufw' in ansible_facts.packages"
+        comment: "GNS3 Server REST API"
+      when: ufw_check.rc == 0
+
+    # ------------------------------------------ open console ports range
+    - name: Open console port range with UFW
+      ufw:
+        rule: allow
+        port: "5000:5010"
+        proto: tcp
+        comment: "GNS3 Console ports"
+      when: ufw_check.rc == 0
+
+    # --------------------------------------------------- display final info
+    - name: Display connection information
+      debug:
+        msg: |
+          GNS3 Server installation completed!
+          
+          REST API URL: http://{{ ansible_default_ipv4.address }}:{{ gns3_port }}
+          
+          For n8n integration, use this base URL in your HTTP nodes:
+          http://{{ ansible_default_ipv4.address }}:{{ gns3_port }}/v2
+          
+          Common endpoints:
+          - GET /v2/projects - List all projects
+          - POST /v2/projects - Create new project
+          - GET /v2/projects/{project_id}/nodes - List nodes in project
+          
+          Service status: systemctl status {{ gns3_service }}
+          Logs: journalctl -u {{ gns3_service }} -f
 
   #############################################################################
   # ──────────────────────────────  Handlers  ────────────────────────────────
