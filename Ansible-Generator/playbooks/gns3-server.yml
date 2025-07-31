@@ -11,237 +11,237 @@
     gns3_user: gns3
     gns3_version: "2.2.48"
 
+  tasks:
   ####################################################################
   # 0) PREP & DEPENDENCIES
   ####################################################################
-  tasks:
-    - name: Stop unattended upgrades (avoids apt locks)
-      shell: |
-        systemctl stop unattended-upgrades || true
-        pkill -f unattended-upgr || true
-        rm -f /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock /var/cache/apt/archives/lock || true
-      changed_when: false
-      ignore_errors: yes
+  - name: Stop unattended upgrades (avoids apt locks)
+    shell: |
+      systemctl stop unattended-upgrades || true
+      pkill -f unattended-upgr || true
+      rm -f /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock /var/cache/apt/archives/lock || true
+    changed_when: false
+    ignore_errors: yes
 
-    - name: Install base & Python runtime packages
-      apt:
-        name:
-          - wget
-          - curl
-          - qemu-kvm
-          - qemu-utils
-          - libvirt-daemon-system
-          - bridge-utils
-          - git
-          - build-essential
-          - python3
-          - python3-pip
-          - python3-setuptools     # GNS3 runtime deps
-          - python3-aiohttp
-          - python3-psutil
-          - python3-jsonschema
-        state: present
-        update_cache: yes
-        lock_timeout: 300
+  - name: Install base & Python runtime packages
+    apt:
+      name:
+        - wget
+        - curl
+        - qemu-kvm
+        - qemu-utils
+        - libvirt-daemon-system
+        - bridge-utils
+        - git
+        - build-essential
+        - python3
+        - python3-pip
+        - python3-setuptools     # GNS3 runtime deps
+        - python3-aiohttp
+        - python3-psutil
+        - python3-jsonschema
+      state: present
+      update_cache: yes
+      lock_timeout: 300
 
-    ####################################################################
-    # 1) INSTALL GNS3-SERVER
-    ####################################################################
-    - name: Download GNS3-server .deb
-      get_url:
-        url: "https://github.com/GNS3/gns3-server/releases/download/v{{ gns3_version }}/gns3-server_{{ gns3_version }}-1_all.deb"
-        dest: /tmp/gns3-server.deb
-        mode: "0644"
-      register: deb_pkg
-      ignore_errors: yes
+  ####################################################################
+  # 1) INSTALL GNS3-SERVER
+  ####################################################################
+  - name: Download GNS3-server .deb
+    get_url:
+      url: "https://github.com/GNS3/gns3-server/releases/download/v{{ gns3_version }}/gns3-server_{{ gns3_version }}-1_all.deb"
+      dest: /tmp/gns3-server.deb
+      mode: "0644"
+    register: deb_pkg
+    ignore_errors: yes
 
-    - name: Install GNS3-server from .deb (preferred)
-      apt:
-        deb: /tmp/gns3-server.deb
-        state: present
-      register: deb_install
-      when: deb_pkg is succeeded
-      ignore_errors: yes
+  - name: Install GNS3-server from .deb (preferred)
+    apt:
+      deb: /tmp/gns3-server.deb
+      state: present
+    register: deb_install
+    when: deb_pkg is succeeded
+    ignore_errors: yes
 
-    - name: Install GNS3-server from PyPI (fallback)
-      shell: pip3 install --break-system-packages gns3-server
-      when: deb_install is failed or deb_pkg is failed
-      register: pip_install
-      ignore_errors: no        # fail hard if pip also fails
+  - name: Install GNS3-server from PyPI (fallback)
+    shell: pip3 install --break-system-packages gns3-server
+    when: deb_install is failed or deb_pkg is failed
+    register: pip_install
+    ignore_errors: no      # fail hard if pip also fails
 
-    ####################################################################
-    # 2) ANCILLARY TOOLS (ubridge / dynamips / vpcs)
-    ####################################################################
-    - name: Build ubridge from source
-      shell: |
-        cd /tmp
-        rm -rf ubridge
-        git clone https://github.com/GNS3/ubridge.git
-        cd ubridge && make clean || true && make && make install
-      ignore_errors: yes
+  ####################################################################
+  # 2) ANCILLARY TOOLS (ubridge / dynamips / vpcs)
+  ####################################################################
+  - name: Build ubridge from source
+    shell: |
+      cd /tmp
+      rm -rf ubridge
+      git clone https://github.com/GNS3/ubridge.git
+      cd ubridge && make clean || true && make && make install
+    ignore_errors: yes
 
-    - name: Build dynamips from source
-      shell: |
-        cd /tmp
-        rm -rf dynamips
-        git clone https://github.com/GNS3/dynamips.git
-        cd dynamips
-        mkdir -p build && cd build
-        cmake .. && make && make install
-      ignore_errors: yes
+  - name: Build dynamips from source
+    shell: |
+      cd /tmp
+      rm -rf dynamips
+      git clone https://github.com/GNS3/dynamips.git
+      cd dynamips
+      mkdir -p build && cd build
+      cmake .. && make && make install
+    ignore_errors: yes
 
-    - name: Build VPCS from source
-      shell: |
-        cd /tmp
-        rm -rf vpcs
-        git clone https://github.com/GNS3/vpcs.git
-        cd vpcs/src && make
-        install -m 755 vpcs /usr/local/bin/vpcs
-      ignore_errors: yes
+  - name: Build VPCS from source
+    shell: |
+      cd /tmp
+      rm -rf vpcs
+      git clone https://github.com/GNS3/vpcs.git
+      cd vpcs/src && make
+      install -m 755 vpcs /usr/local/bin/vpcs
+    ignore_errors: yes
 
-    ####################################################################
-    # 3) FILESYSTEM & USER
-    ####################################################################
-    - name: Create service user
-      user:
-        name: "{{ gns3_user }}"
-        system: yes
-        create_home: yes
-        home: /opt/gns3
-        shell: /usr/sbin/nologin
-        groups: kvm,libvirt
+  ####################################################################
+  # 3) FILESYSTEM & USER
+  ####################################################################
+  - name: Create service user
+    user:
+      name: "{{ gns3_user }}"
+      system: yes
+      create_home: yes
+      home: /opt/gns3
+      shell: /usr/sbin/nologin
+      groups: kvm,libvirt
 
-    - name: Create GNS3 directories
-      file:
-        path: "{{ item }}"
-        state: directory
-        owner: "{{ gns3_user }}"
-        group: "{{ gns3_user }}"
-        mode: "0755"
-      loop:
-        - /etc/gns3
-        - /opt/gns3/images
-        - /opt/gns3/projects
-        - /var/log/gns3
+  - name: Create GNS3 directories
+    file:
+      path: "{{ item }}"
+      state: directory
+      owner: "{{ gns3_user }}"
+      group: "{{ gns3_user }}"
+      mode: "0755"
+    loop:
+      - /etc/gns3
+      - /opt/gns3/images
+      - /opt/gns3/projects
+      - /var/log/gns3
 
-    - name: Deploy gns3_server.conf
-      copy:
-        dest: /etc/gns3/gns3_server.conf
-        owner: "{{ gns3_user }}"
-        group: "{{ gns3_user }}"
-        mode: "0644"
-        content: |
-          [Server]
-          host = {{ gns3_host }}
-          port = {{ gns3_port }}
-          auth = False
-          cors = True
-          console_start_port_range = 5000
-          console_end_port_range = 5010
-          images_path = /opt/gns3/images
-          projects_path = /opt/gns3/projects
+  - name: Deploy gns3_server.conf
+    copy:
+      dest: /etc/gns3/gns3_server.conf
+      owner: "{{ gns3_user }}"
+      group: "{{ gns3_user }}"
+      mode: "0644"
+      content: |
+        [Server]
+        host = {{ gns3_host }}
+        port = {{ gns3_port }}
+        auth = False
+        cors = True
+        console_start_port_range = 5000
+        console_end_port_range = 5010
+        images_path = /opt/gns3/images
+        projects_path = /opt/gns3/projects
 
-          [Qemu]
-          enable_kvm = True
-          require_kvm = False
-      notify: restart gns3
+        [Qemu]
+        enable_kvm = True
+        require_kvm = False
+    notify: restart gns3
 
-    ####################################################################
-    # 4) LOCATE THE gns3server BINARY — FAIL IF NOT FOUND
-    ####################################################################
-    - name: Locate gns3server binary
-      shell: |
-        if command -v gns3server >/dev/null 2>&1; then
-          command -v gns3server
-        elif [ -x /usr/local/bin/gns3server ]; then
-          echo /usr/local/bin/gns3server
-        else
-          echo ""
-        fi
-      register: gns3server_path
-      changed_when: false
+  ####################################################################
+  # 4) LOCATE THE gns3server BINARY — FAIL IF NOT FOUND
+  ####################################################################
+  - name: Locate gns3server binary
+    shell: |
+      if command -v gns3server >/dev/null 2>&1; then
+        command -v gns3server
+      elif [ -x /usr/local/bin/gns3server ]; then
+        echo /usr/local/bin/gns3server
+      else
+        echo ""
+      fi
+    register: gns3server_path
+    changed_when: false
 
-    - name: Abort if gns3server binary not found
-      fail:
-        msg: "gns3server binary not found anywhere! Install step must have failed."
-      when: gns3server_path.stdout | trim == ""
+  - name: Abort if gns3server binary not found
+    fail:
+      msg: "gns3server binary not found anywhere! Install step must have failed."
+    when: gns3server_path.stdout | trim == ""
 
-    ####################################################################
-    # 5) SYSTEMD SERVICE
-    ####################################################################
-    - name: Deploy gns3.service
-      copy:
-        dest: /etc/systemd/system/gns3.service
-        mode: "0644"
-        content: |
-          [Unit]
-          Description=GNS3 Server
-          After=network.target
+  ####################################################################
+  # 5) SYSTEMD SERVICE
+  ####################################################################
+  - name: Deploy gns3.service
+    copy:
+      dest: /etc/systemd/system/gns3.service
+      mode: "0644"
+      content: |
+        [Unit]
+        Description=GNS3 Server
+        After=network.target
 
-          [Service]
-          User={{ gns3_user }}
-          Group={{ gns3_user }}
-          WorkingDirectory=/opt/gns3
-          ExecStart={{ gns3server_path.stdout | default('/usr/local/bin/gns3server') }} \
-                     --config /etc/gns3/gns3_server.conf \
-                     --local \
-                     --log /var/log/gns3/gns3.log
-          Restart=always
-          RestartSec=5
+        [Service]
+        User={{ gns3_user }}
+        Group={{ gns3_user }}
+        WorkingDirectory=/opt/gns3
+        ExecStart={{ gns3server_path.stdout | default('/usr/local/bin/gns3server') }} \
+                   --config /etc/gns3/gns3_server.conf \
+                   --local \
+                   --log /var/log/gns3/gns3.log
+        Restart=always
+        RestartSec=5
 
-          [Install]
-          WantedBy=multi-user.target
-      notify:
-        - reload systemd
-        - restart gns3
+        [Install]
+        WantedBy=multi-user.target
+    notify:
+      - reload systemd
+      - restart gns3
 
-    - name: Enable & start gns3.service
-      systemd:
-        name: gns3
-        enabled: yes
-        state: started
-        daemon_reload: yes
+  - name: Enable & start gns3.service
+    systemd:
+      name: gns3
+      enabled: yes
+      state: started
+      daemon_reload: yes
 
-    ####################################################################
-    # 6) FIREWALL
-    ####################################################################
-    - name: Check if UFW is active
-      shell: ufw status | grep -q "Status: active"
-      register: ufw_active
-      failed_when: false
-      changed_when: false
+  ####################################################################
+  # 6) FIREWALL
+  ####################################################################
+  - name: Check if UFW is active
+    shell: "ufw status | grep -q 'Status: active'"
+    register: ufw_active
+    failed_when: false
+    changed_when: false
 
-    - name: Open GNS3 TCP ports when UFW is active
-      ufw:
-        rule: allow
-        port: "{{ item }}"
-        proto: tcp
-      loop:
-        - "{{ gns3_port }}"
-        - "5000:5010"
-      when: ufw_active.rc == 0
+  - name: Open GNS3 TCP ports when UFW is active
+    ufw:
+      rule: allow
+      port: "{{ item }}"
+      proto: tcp
+    loop:
+      - "{{ gns3_port }}"
+      - "5000:5010"
+    when: ufw_active.rc == 0
 
-    ####################################################################
-    # 7) VERIFY SERVER IS RESPONDING
-    ####################################################################
-    - name: Wait until the API answers
-      uri:
-        url: "http://localhost:{{ gns3_port }}/v2/version"
-        method: GET
-      register: api_test
-      retries: 5
-      delay: 3
-      until: api_test.status == 200
+  ####################################################################
+  # 7) VERIFY SERVER IS RESPONDING
+  ####################################################################
+  - name: Wait until the API answers
+    uri:
+      url: "http://localhost:{{ gns3_port }}/v2/version"
+      method: GET
+    register: api_test
+    retries: 5
+    delay: 3
+    until: api_test.status == 200
 
-    - name: Print connection details
-      debug:
-        msg: |
-          ================================
-          GNS3 Server Installation Complete
-          ================================
-          REST API URL : http://{{ ansible_default_ipv4.address }}:{{ gns3_port }}
-          Test with    : curl http://{{ ansible_default_ipv4.address }}:{{ gns3_port }}/v2/version
-          Logs         : journalctl -u gns3 -f
+  - name: Print connection details
+    debug:
+      msg: |
+        ================================
+        GNS3 Server Installation Complete
+        ================================
+        REST API URL : http://{{ ansible_default_ipv4.address }}:{{ gns3_port }}
+        Test with    : curl http://{{ ansible_default_ipv4.address }}:{{ gns3_port }}/v2/version
+        Logs         : journalctl -u gns3 -f
 
   ####################################################################
   # HANDLERS
