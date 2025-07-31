@@ -24,17 +24,31 @@
   # ──────────────────────────────  Play steps  ───────────────────────────────
   #############################################################################
   tasks:
-    # ------------------------------------------ wait for automatic updates
-    - name: Wait for automatic system updates to complete
-      shell: while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do sleep 5; done
+    # ------------------------------------------ handle automatic updates
+    - name: Check if unattended-upgrades is running
+      shell: pgrep -f unattended-upgr || echo "not running"
+      register: unattended_check
       changed_when: false
 
-    - name: Wait for unattended-upgrades to finish
+    - name: Stop unattended-upgrades if running
       shell: |
-        while pgrep -x unattended-upgr >/dev/null; do
-          echo "Waiting for unattended-upgrades to finish..."
-          sleep 30
+        sudo systemctl stop unattended-upgrades
+        sudo pkill -f unattended-upgr || true
+        sleep 10
+      when: "'unattended-upgr' in unattended_check.stdout"
+      changed_when: false
+
+    - name: Wait for dpkg lock to be released (max 2 minutes)
+      shell: |
+        timeout=120
+        while [ $timeout -gt 0 ] && fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do
+          sleep 5
+          timeout=$((timeout - 5))
         done
+        if [ $timeout -le 0 ]; then
+          echo "Timeout waiting for dpkg lock"
+          exit 1
+        fi
       changed_when: false
 
     # ------------------------------------------------------------------ tools
