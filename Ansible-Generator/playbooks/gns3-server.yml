@@ -77,14 +77,18 @@
     ####################################################################
     # 2) ANCILLARY TOOLS  (uBridge / Dynamips / VPCS)
     ####################################################################
-    - name: Install uBridge build dependencies
+    - name: Install build dependencies for all tools
       apt:
         name:
-          - libpcap-dev
+          - libpcap-dev         # uBridge dependency
+          - libelf-dev          # Dynamips dependency
           - cmake
           - make
           - gcc
           - g++
+          - autoconf            # VPCS dependency
+          - automake            # VPCS dependency
+          - libtool             # VPCS dependency
         state: present
         update_cache: yes
 
@@ -114,9 +118,22 @@
         cd /tmp
         rm -rf vpcs
         git clone https://github.com/GNS3/vpcs.git
-        cd vpcs/src
-        make
-        install -m 755 vpcs /usr/local/bin/vpcs
+        cd vpcs
+        # Check if configure script exists, if not try autogen
+        if [ -f configure ]; then
+          ./configure && make
+        elif [ -f autogen.sh ]; then
+          ./autogen.sh && ./configure && make
+        else
+          # Try building directly in src directory
+          cd src && make -f Makefile.linux
+        fi
+        # Install vpcs binary
+        if [ -f vpcs ]; then
+          install -m 755 vpcs /usr/local/bin/vpcs
+        elif [ -f src/vpcs ]; then
+          install -m 755 src/vpcs /usr/local/bin/vpcs
+        fi
       ignore_errors: yes
 
     ####################################################################
