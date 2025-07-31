@@ -77,6 +77,17 @@
     ####################################################################
     # 2) ANCILLARY TOOLS  (uBridge / Dynamips / VPCS)
     ####################################################################
+    - name: Install uBridge build dependencies
+      apt:
+        name:
+          - libpcap-dev
+          - cmake
+          - make
+          - gcc
+          - g++
+        state: present
+        update_cache: yes
+
     - name: Build uBridge from source
       shell: |
         cd /tmp
