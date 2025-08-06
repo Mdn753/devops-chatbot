@@ -295,47 +295,69 @@
       - zabbix-agent
 
   ######################################################################
-  # 10 · Health-checks
+  # 10 · Health-checks (UPDATED)
   ######################################################################
-  - name: Pause to allow services to stabilize
+  - name: Pause longer to allow Zabbix server to fully initialize
     pause:
-      seconds: 20
+      seconds: 60 # Increased from 20 seconds
 
-  - name: Check zabbix-server unit state
+  - name: Check zabbix-server unit state (final check)
     shell: systemctl is-active zabbix-server
-    register: zbx_state
+    register: zbx_final_state
     changed_when: false
-    failed_when: false # ← ignore non-zero RC initially
+    failed_when: false # Don't fail the playbook yet, let's check logs first
 
-  - name: Show logs and fail if not running
-    when: zbx_state.stdout != "active"
+  - name: Show logs and fail if service is not running after wait
+    when: zbx_final_state.stdout != "active"
     block:
-      - name: Get recent zabbix-server logs
-        shell: journalctl -u zabbix-server -n 20 --no-pager
-        register: zbx_logs
+      - name: Get recent zabbix-server logs (failure scenario)
+        shell: journalctl -u zabbix-server -n 30 --no-pager
+        register: zbx_final_logs
         changed_when: false
       - name: Display zabbix-server failure logs
         debug:
           msg: |
-            ❌ zabbix-server service is {{ zbx_state.stdout }}.
-            Last 20 log lines:
-            {{ zbx_logs.stdout }}
-      - name: Fail the playbook due to zabbix-server startup failure
+            ❌ zabbix-server service is NOT active (state: {{ zbx_final_state.stdout }}).
+            Recent log lines:
+            {{ zbx_final_logs.stdout }}
+      - name: Fail the playbook due to zabbix-server not being active
         fail:
-          msg: "zabbix-server failed to start. See logs above."
+          msg: "zabbix-server failed to stay running after initialization. See logs above."
 
-  - name: Detect bind address of port 10051
-    when: zbx_state.stdout == "active"
+  # --- Only proceed with port check if service is confirmed active ---
+  - name: Detect bind address of port 10051 (only if service is active)
+    when: zbx_final_state.stdout == "active"
     shell: ss -ltnH '( sport = :10051 )' | awk '{print $4}' | head -n1
     register: zbx_bind
     changed_when: false
+    # Add a small delay before checking the port, just in case
+    vars:
+      ansible_ssh_pipelining: false # Force a new SSH connection for timing
 
-  - name: Wait for Zabbix server to bind to port 10051
-    when: zbx_state.stdout == "active"
+  - name: Debug detected bind address
+    when: zbx_final_state.stdout == "active"
+    debug:
+      msg: "Detected Zabbix server bind address: '{{ zbx_bind.stdout }}'"
+
+  - name: Wait for Zabbix server to bind to port 10051 (only if service is active)
+    when:
+      - zbx_final_state.stdout == "active"
+      - zbx_bind.stdout is defined and zbx_bind.stdout != ""
     wait_for:
-      host: "{{ zbx_bind.stdout | default('127.0.0.1') }}"
+      host: "{{ zbx_bind.stdout.split(':')[0] | default('127.0.0.1') }}" # Extract IP if addr:port format
+      port: "{{ zbx_bind.stdout.split(':')[1] | default(10051) }}"       # Extract Port if addr:port format
+      timeout: 120 # Increased timeout for port check as well
+
+  # --- Fallback port check if ss command didn't yield a clear result ---
+  - name: Fallback wait for Zabbix server on default localhost port (if bind check unclear)
+    when:
+      - zbx_final_state.stdout == "active"
+      - (zbx_bind.stdout is not defined) or (zbx_bind.stdout == "")
+    wait_for:
+      host: "127.0.0.1"
       port: 10051
-      timeout: 180
+      timeout: 120
+
 
   ######################################################################
   # 11 · Summary
