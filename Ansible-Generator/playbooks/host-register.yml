@@ -41,18 +41,19 @@
   tasks:
     # 0) Sanity check
     - name: Fail if required vars are missing
-      fail:
-        msg: |
-          Missing required variables. Provide:
+      assert:
+        that:
+          - vars.get('zbx_api_url', '')        | length > 0
+          - vars.get('zbx_api_password', '')   | length > 0
+          - vars.get('vm_name', '')            | length > 0
+          - vars.get('vm_ip', '')              | length > 0
+        fail_msg: |
+          Missing required variables.
+          Provide:
             • zbx_api_url
             • zbx_api_password
             • vm_name
             • vm_ip
-      when: >
-        zbx_api_url is undefined or
-        zbx_api_password is undefined or
-        vm_name is undefined or
-        vm_ip is undefined
 
     # 1) Login
     - name: Login to Zabbix API
