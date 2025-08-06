@@ -11,7 +11,7 @@
 # 0 • Variables
 ########################################################################
   vars:
-    zabbix_version:          "6.0"          # "6.0" LTS  or "7.0" stable
+    zabbix_version:          "7.0"          # "6.0" LTS  or "7.0" stable
     zabbix_db_name:          zabbix
     zabbix_db_user:          zabbix
     zabbix_db_password:      "StrongDBpass!"
@@ -108,25 +108,22 @@
       update_cache: yes
 
   ######################################################################
-  # 5 • Locate SQL files directory automatically
+  # 5 • Locate SQL files directory (robust “find” version)
   ######################################################################
-  - name: Locate schema.sql.gz on the host
+  - name: Locate schema.sql(.gz) on the host
     shell: |
-      set -o pipefail
-      for d in \
-        /usr/share/zabbix-sql-scripts/mysql* \
-        /usr/share/doc/zabbix-sql-scripts/mysql* ; do
-        if [ -e "$d/schema.sql.gz" ]; then echo "$d"; break; fi
-      done
-    register: sql_dir
+      find /usr/share /usr/share/doc -type f \
+           -path '*zabbix*sql*scripts*' \
+           -name 'schema.sql*' -print -quit
+    register: sql_schema_path
     changed_when: false
-    failed_when: sql_dir.stdout == ""
+    failed_when: sql_schema_path.stdout == ""
     args:
       executable: /bin/bash
 
   - name: Save detected SQL directory
     set_fact:
-      zbx_sql_dir: "{{ sql_dir.stdout }}"
+      zbx_sql_dir: "{{ sql_schema_path.stdout | dirname }}"
 
   ######################################################################
   # 6 • Import schema if DB is empty
@@ -142,15 +139,26 @@
 
   - name: Import Zabbix schema (first run only)
     when: (tablecount.query_result[0][0] | int) == 0
-    loop: [schema.sql.gz, images.sql.gz, data.sql.gz]
+    loop:
+      - schema.sql.gz
+      - schema.sql              # fallback if files are uncompressed
+      - images.sql.gz
+      - images.sql
+      - data.sql.gz
+      - data.sql
     loop_control: { loop_var: sqlfile }
-    mysql_db:
-      name: "{{ zabbix_db_name }}"
-      state: import
-      target: "{{ zbx_sql_dir }}/{{ sqlfile }}"
-      login_user: "{{ zabbix_db_user }}"
-      login_password: "{{ zabbix_db_password }}"
-      login_host: localhost
+    vars:
+      src_file: "{{ zbx_sql_dir }}/{{ sqlfile }}"
+    when: "ansible.builtin.stat(path=src_file).stat.exists"
+    block:
+      - name: Import {{ sqlfile }}
+        mysql_db:
+          name: "{{ zabbix_db_name }}"
+          state: import
+          target: "{{ src_file }}"
+          login_user: "{{ zabbix_db_user }}"
+          login_password: "{{ zabbix_db_password }}"
+          login_host: localhost
 
   ######################################################################
   # 7 • Configure server & PHP
