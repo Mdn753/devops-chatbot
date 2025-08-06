@@ -1,5 +1,5 @@
 ---
-# install_zabbix_final.yml — Ubuntu 18.04 • 20.04 • 22.04 • 24.04
+# install_zabbix_fixed_for_2404.yml — Ubuntu 18.04 • 20.04 • 22.04 • 24.04
 # Installs Zabbix 7.0 by default. Override: -e zabbix_version=6.0
 
 - name: Install & configure Zabbix {{ zabbix_version }}
@@ -19,14 +19,24 @@
     php_timezone:            "Africa/Casablanca"
 
     zbx_keyring:             /usr/share/keyrings/zabbix.gpg
-    # Determine compatible Ubuntu codename for Zabbix repo
+    # --- Determine the correct Ubuntu codename for the Zabbix repo path ---
+    # Store the actual release detected by Ansible
+    detected_release: "{{ ansible_distribution_release }}"
+    # List of Ubuntu releases that Zabbix explicitly supports
+    supported_releases: ['bionic', 'focal', 'jammy', 'noble'] # Add 'plucky' if/when supported
+    # Logic: Use detected release if supported, otherwise fallback strategy
     zbx_ubuntu_codename: >-
       {{
-        'jammy' if ansible_distribution_release in ['noble', 'plucky'] else
-        ( ansible_distribution_release if ansible_distribution_release in ['jammy', 'focal', 'bionic'] else 'jammy' )
+        detected_release if detected_release in supported_releases
+        else 'jammy' # Default fallback
       }}
 
     mysql_socket:            /var/run/mysqld/mysqld.sock
+    # Flag to track if we are using the fallback repo
+    using_fallback_repo: >-
+      {{
+        detected_release != zbx_ubuntu_codename
+      }}
 
 ########################################################################
 # TASKS
@@ -92,7 +102,7 @@
       login_unix_socket: "{{ mysql_socket }}"
 
   ######################################################################
-  # 3 · Zabbix repository (CORRECTED FOR 24.04/Noble)
+  # 3 · Zabbix repository (CORRECTED FOR 24.04/Noble with Fallback)
   ######################################################################
   - name: Import Zabbix GPG key
     shell: |
@@ -100,23 +110,44 @@
     args:
       creates: "{{ zbx_keyring }}"
 
-  - name: Debug Zabbix repository variables (Optional)
+  - name: Debug Zabbix repository variables
     debug:
-      msg: "Zabbix Version: {{ zabbix_version }}, Detected OS Release: {{ ansible_distribution_release }}, Using Repo Codename: {{ zbx_ubuntu_codename }}"
+      msg: |
+        Detected OS Release: {{ detected_release }}
+        Zabbix Repo Codename: {{ zbx_ubuntu_codename }}
+        Using Fallback (jammy)? {{ using_fallback_repo }}
 
-  - name: Add Zabbix APT repository
+  # --- Add the primary Zabbix repository ---
+  - name: Add primary Zabbix APT repository
     apt_repository:
       repo: "deb [signed-by={{ zbx_keyring }}] https://repo.zabbix.com/zabbix/{{ zabbix_version }}/ubuntu {{ zbx_ubuntu_codename }} main"
       filename: zabbix
       state: present
 
-  - name: Update apt cache after adding Zabbix repository
+  # --- If using fallback (e.g., noble->jammy), add jammy repo for deps ---
+  - name: Add Ubuntu 22.04 (jammy) repo for fallback dependencies (if needed)
+    apt_repository:
+      repo: "deb http://archive.ubuntu.com/ubuntu/ jammy main universe"
+      filename: ubuntu_jammy_fallback
+      state: present
+    when: using_fallback_repo | bool
+
+  - name: Update apt cache after adding repositories
     apt:
       update_cache: yes
     retries: 3
     delay: 5
     register: apt_update_result
     until: apt_update_result is succeeded
+
+  # --- Explicitly install potentially missing dependency if fallback used ---
+  - name: Install libldap-2.5-0 from jammy (if using fallback repo)
+    apt:
+      name: libldap-2.5-0
+      state: present
+      # Allow downgrades/pick from specific release if needed
+      # default_release: jammy # This might be needed, test without first
+    when: using_fallback_repo | bool
 
   ######################################################################
   # 4 · Install Zabbix packages
@@ -130,7 +161,7 @@
         - zabbix-sql-scripts
         - zabbix-agent
       state: present
-      update_cache: yes
+      update_cache: yes # Ensure cache is fresh for this install step
 
   ######################################################################
   # 5 · Locate SQL scripts directory & Import schema
@@ -205,7 +236,7 @@
           login_user: "{{ zabbix_db_user }}"
           login_password: "{{ zabbix_db_password }}"
           login_unix_socket: "{{ mysql_socket }}"
-        when: (images_gz_stat.stat.exists or (zbx_sql_dir + '/images.sql') is file) and (images_gz_stat.stat.exists or (zbx_sql_dir + '/images.sql') is file) # Redundant check removed in logic
+        when: images_gz_stat.stat.exists or (zbx_sql_dir + '/images.sql') is file
 
       # --- Decompress and Import Data ---
       - name: Check if data.sql.gz exists
@@ -330,9 +361,6 @@
     shell: ss -ltnH '( sport = :10051 )' | awk '{print $4}' | head -n1
     register: zbx_bind
     changed_when: false
-    # Add a small delay before checking the port, just in case
-    vars:
-      ansible_ssh_pipelining: false # Force a new SSH connection for timing
 
   - name: Debug detected bind address
     when: zbx_final_state.stdout == "active"
@@ -357,7 +385,6 @@
       host: "127.0.0.1"
       port: 10051
       timeout: 120
-
 
   ######################################################################
   # 11 · Summary
