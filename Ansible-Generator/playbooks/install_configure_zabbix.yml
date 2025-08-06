@@ -1,5 +1,5 @@
 ---
-# zabbix_install.yml — Ubuntu 20.04/22.04  |  Zabbix 6.0 LTS (set zabbix_version to "7.0" for the stable line)
+# zabbix_install.yml — Ubuntu 20.04/22.04 | Zabbix 6 LTS
 
 - name: Zabbix {{ zabbix_version }} LTS — manual installation
   hosts: Zabbix-server
@@ -7,23 +7,19 @@
   gather_facts: true
 
 ########################################################################
-# 0 • Parameters (override in inventory or --extra-vars)
+# 0 • Parameters
 ########################################################################
   vars:
-    zabbix_version:          "6.0"          # "6.0" LTS or "7.0" stable
+    zabbix_version:          "6.0"
     zabbix_db_name:          zabbix
     zabbix_db_user:          zabbix
     zabbix_db_password:      "StrongDBpass!"
     zabbix_admin_password:   "zabbix"
     php_timezone:            "Africa/Casablanca"
-
-    # Repository settings
     zbx_keyring:             /usr/share/keyrings/zabbix.gpg
     zbx_series: >-
       {% set rel = ansible_distribution_release %}
       {{ rel if rel in ['jammy','focal','bionic'] else 'jammy' }}
-
-    # MariaDB root via Unix socket (no password needed)
     mysql_socket:            /var/run/mysqld/mysqld.sock
 
 ########################################################################
@@ -31,9 +27,9 @@
 ########################################################################
   tasks:
   ######################################################################
-  # 1 • Base packages + PyMySQL driver
+  # 1 • System packages + PyMySQL
   ######################################################################
-  - name: Install system & PHP packages
+  - name: Install base packages
     apt:
       name:
         - mariadb-server
@@ -60,7 +56,7 @@
       update_cache: yes
 
   ######################################################################
-  # 2 • MariaDB: create DB & user
+  # 2 • MariaDB DB & user
   ######################################################################
   - name: Ensure Zabbix database
     community.mysql.mysql_db:
@@ -115,18 +111,21 @@
       update_cache: yes
 
   ######################################################################
-  # 5 • Import schema if DB is empty
+  # 5 • Import schema if DB is empty  (FIXED)
   ######################################################################
-  - name: Get table count (run as root via socket)
-    community.mysql.mysql_info:
-      filter: table_count
+  - name: Get table count (root via socket)
+    community.mysql.mysql_query:
+      query: |
+        SELECT COUNT(*) AS tcount
+        FROM information_schema.tables
+        WHERE table_schema='{{ zabbix_db_name }}';
       login_user: root
       login_unix_socket: "{{ mysql_socket }}"
-      login_db: "{{ zabbix_db_name }}"
-    register: dbinfo
+      return_dict: yes
+    register: tablecount
 
   - name: Import Zabbix schema (first time only)
-    when: dbinfo.table_count == 0
+    when: (tablecount.query_result[0].tcount | int) == 0
     shell: |
       for f in schema.sql.gz images.sql.gz data.sql.gz; do
         zcat /usr/share/zabbix-sql-scripts/mysql{{ zabbix_version }}/$f | \
@@ -136,7 +135,7 @@
     args: { executable: /bin/bash }
 
   ######################################################################
-  # 6 • Configure zabbix_server.conf & PHP timezone
+  # 6 • Configure zabbix_server.conf & PHP
   ######################################################################
   - name: Configure Zabbix server DB parameters
     lineinfile:
