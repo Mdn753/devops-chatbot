@@ -1,5 +1,5 @@
 ---
-# zabbix_install.yml  —  Works with Ubuntu 20.04/22.04, Zabbix 6 LTS
+# zabbix_install.yml  —  Ubuntu 20.04/22.04 + Zabbix 6 LTS
 
 - name: Zabbix {{ zabbix_version }} LTS — manual installation
   hosts: Zabbix-server
@@ -10,28 +10,24 @@
 # 0 • Parameters
 ########################################################################
   vars:
-    # Zabbix branch you want (6.0 for LTS, 7.0 for stable)
-    zabbix_version:          "6.0"
-
-    # DB / UI credentials
+    zabbix_version:          "6.0"           # set to "7.0" for the stable line
     zabbix_db_name:          zabbix
     zabbix_db_user:          zabbix
     zabbix_db_password:      "StrongDBpass!"
     zabbix_admin_password:   "zabbix"
-
-    # Misc
     php_timezone:            "Africa/Casablanca"
     zbx_keyring:             /usr/share/keyrings/zabbix.gpg
-
-    # Map Ubuntu codename → repo codename supported by Zabbix
     zbx_series: >-
       {% set rel = ansible_distribution_release %}
       {{ rel if rel in ['jammy','focal','bionic'] else 'jammy' }}
 
+########################################################################
+# TASKS
+########################################################################
   tasks:
-########################################################################
-# 1 • Base packages (MariaDB, Apache/PHP)
-########################################################################
+  ######################################################################
+  # 1 • Base packages (MariaDB, Apache/PHP) + PyMySQL driver
+  ######################################################################
   - name: Install base packages
     apt:
       name:
@@ -53,9 +49,15 @@
       update_cache: yes
     when: ansible_os_family == "Debian"
 
-########################################################################
-# 2 • MariaDB: create DB & user (idempotent)
-########################################################################
+  - name: Install PyMySQL so Ansible can talk to MariaDB   # <─ NEW
+    apt:
+      name: python3-pymysql
+      state: present
+      update_cache: yes
+
+  ######################################################################
+  # 2 • MariaDB: create DB & user (idempotent)
+  ######################################################################
   - name: Ensure Zabbix database
     community.mysql.mysql_db:
       name: "{{ zabbix_db_name }}"
@@ -71,9 +73,9 @@
       priv: "{{ zabbix_db_name }}.*:ALL"
       state: present
 
-########################################################################
-# 3 • Add official Zabbix repo
-########################################################################
+  ######################################################################
+  # 3 • Add official Zabbix repo
+  ######################################################################
   - name: Import Zabbix GPG key
     shell: |
       curl -fsSL https://repo.zabbix.com/zabbix-official-repo.key | \
@@ -90,9 +92,9 @@
       state: present
       update_cache: yes
 
-########################################################################
-# 4 • Install Zabbix packages
-########################################################################
+  ######################################################################
+  # 4 • Install Zabbix packages
+  ######################################################################
   - name: Install Zabbix server, web frontend & agent
     apt:
       name:
@@ -104,9 +106,9 @@
       state: present
       update_cache: yes
 
-########################################################################
-# 5 • Import schema if DB is empty
-########################################################################
+  ######################################################################
+  # 5 • Import schema if DB is empty
+  ######################################################################
   - name: Get table count
     community.mysql.mysql_info:
       filter: table_count
@@ -125,9 +127,9 @@
       done
     args: { executable: /bin/bash }
 
-########################################################################
-# 6 • Configure zabbix_server.conf & PHP timezone
-########################################################################
+  ######################################################################
+  # 6 • Configure zabbix_server.conf & PHP timezone
+  ######################################################################
   - name: Configure Zabbix server connection parameters
     lineinfile:
       path: /etc/zabbix/zabbix_server.conf
@@ -149,9 +151,9 @@
       backup: yes
     notify: restart apache
 
-########################################################################
-# 7 • Agent hostname sanitisation
-########################################################################
+  ######################################################################
+  # 7 • Agent hostname sanitisation
+  ######################################################################
   - name: Derive clean Zabbix agent hostname
     set_fact:
       zbx_agent_hostname: >-
@@ -171,9 +173,9 @@
         Hostname={{ zbx_agent_hostname }}
     notify: restart zabbix-agent
 
-########################################################################
-# 8 • Config-check BEFORE first start
-########################################################################
+  ######################################################################
+  # 8 • Config-check BEFORE first start
+  ######################################################################
   - name: Validate zabbix_server.conf
     become_user: zabbix
     command: >
@@ -182,9 +184,9 @@
     changed_when: false
     failed_when: "'configuration file is valid' not in cfgchk.stdout"
 
-########################################################################
-# 9 • Enable & start services
-########################################################################
+  ######################################################################
+  # 9 • Enable & start services
+  ######################################################################
   - name: Start and enable services
     systemd:
       name: "{{ item }}"
@@ -203,9 +205,9 @@
       msg: "zabbix-server status: {{ ansible_facts.services['zabbix-server.service'].state }}"
     when: ansible_facts.services['zabbix-server.service'].state != 'running'
 
-########################################################################
-# 10 • Wait for open ports (network layer)
-########################################################################
+  ######################################################################
+  # 10 • Wait for open ports (network layer)
+  ######################################################################
   - name: Wait for Zabbix server port
     wait_for:
       host: "{{ ansible_default_ipv4.address }}"
@@ -218,9 +220,9 @@
       port: 80
       timeout: 30
 
-########################################################################
-# 11 • Finish banner
-########################################################################
+  ######################################################################
+  # 11 • Finish banner
+  ######################################################################
   - name: Show installation summary
     debug:
       msg: |
