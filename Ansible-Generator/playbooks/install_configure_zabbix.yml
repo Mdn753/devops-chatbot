@@ -1,6 +1,8 @@
 ---
 # install_zabbix.yml ─ Ubuntu 18.04 · 20.04 · 22.04
-# Installs Zabbix 6.0 LTS by default; override with -e zabbix_version=7.0
+#
+# ▸ Default branch : 6.0 LTS
+# ▸ Override       : ansible-playbook install_zabbix.yml -e zabbix_version=7.0
 
 - name: Install & configure Zabbix {{ zabbix_version }}
   hosts: Zabbix-server
@@ -8,10 +10,10 @@
   gather_facts: true
 
 ########################################################################
-# 0 · Variables
+# 0 · Variables (override via inventory / --extra-vars)
 ########################################################################
   vars:
-    zabbix_version:          "6.0"          # "6.0" LTS or "7.0" stable
+    zabbix_version:          "6.0"          # "6.0" LTS  or  "7.0" stable
     zabbix_db_name:          zabbix
     zabbix_db_user:          zabbix
     zabbix_db_password:      "StrongDBpass!"
@@ -23,16 +25,16 @@
       {% set rel = ansible_distribution_release %}
       {{ rel if rel in ['jammy','focal','bionic'] else 'jammy' }}
 
-    mysql_socket:            /var/run/mysqld/mysqld.sock        # root via socket
+    mysql_socket:            /var/run/mysqld/mysqld.sock   # root via socket
 
 ########################################################################
 # TASKS
 ########################################################################
   tasks:
   ######################################################################
-  # 1 · System packages
+  # 1 · System packages + PyMySQL
   ######################################################################
-  - name: Install required packages
+  - name: Install base OS & PHP packages
     apt:
       name:
         - mariadb-server
@@ -48,7 +50,7 @@
         - gnupg
         - lsb-release
         - ca-certificates
-        - python3-pymysql               # MySQL driver for Ansible
+        - python3-pymysql
       state: present
       update_cache: yes
 
@@ -75,11 +77,12 @@
       login_unix_socket: "{{ mysql_socket }}"
 
   ######################################################################
-  # 3 · Zabbix repository
+  # 3 · Official Zabbix repository
   ######################################################################
   - name: Import Zabbix GPG key
-    shell: curl -fsSL https://repo.zabbix.com/zabbix-official-repo.key | \
-           gpg --dearmor -o {{ zbx_keyring }}
+    shell: |
+      curl -fsSL https://repo.zabbix.com/zabbix-official-repo.key |
+      gpg --dearmor -o {{ zbx_keyring }}
     args: { creates: "{{ zbx_keyring }}" }
 
   - name: Add Zabbix APT repository
@@ -107,9 +110,9 @@
       update_cache: yes
 
   ######################################################################
-  # 5 · Locate SQL directory
+  # 5 · Locate SQL scripts directory
   ######################################################################
-  - name: Locate schema.sql(.gz) anywhere on disk
+  - name: Locate schema.sql(.gz) anywhere under /usr/share*
     shell: |
       set -o pipefail
       find /usr/share /usr/share/doc -type f -path '*zabbix*sql*' \
@@ -123,7 +126,7 @@
       zbx_sql_dir: "{{ sql_schema_path.stdout | dirname }}"
 
   ######################################################################
-  # 6 · Import schema if DB empty  ←←  **FIXED SECTION**
+  # 6 · Import schema if DB empty
   ######################################################################
   - name: Count tables in DB
     community.mysql.mysql_query:
@@ -136,10 +139,13 @@
   - name: Build list of SQL files present
     when: tablecount.query_result[0][0]|int == 0
     set_fact:
-      sql_files: "{{ query('ansible.builtin.fileglob', zbx_sql_dir ~ '/*{schema,images,data}.sql*') }}"
+      sql_files: "{{ query('ansible.builtin.fileglob',
+                           zbx_sql_dir ~ '/*{schema,images,data}.sql*') }}"
 
-  - name: Import SQL files
-    when: sql_files | length > 0 and tablecount.query_result[0][0]|int == 0
+  - name: Import SQL files (compressed & plain)
+    when:
+      - tablecount.query_result[0][0]|int == 0
+      - sql_files | length > 0
     shell: |
       if [[ "{{ item }}" == *.gz ]]; then
         zcat "{{ item }}" | mysql -u{{ zabbix_db_user }} -p{{ zabbix_db_password }} {{ zabbix_db_name }}
@@ -152,7 +158,7 @@
   ######################################################################
   # 7 · Configure server & PHP
   ######################################################################
-  - name: Configure zabbix_server.conf
+  - name: Configure /etc/zabbix/zabbix_server.conf
     lineinfile:
       path: /etc/zabbix/zabbix_server.conf
       regexp: "{{ item.regexp }}"
@@ -173,7 +179,7 @@
     notify: restart apache
 
   ######################################################################
-  # 8 · Runtime dir & agent Hostname
+  # 8 · Runtime dir & agent hostname
   ######################################################################
   - file: { path: /run/zabbix, state: directory, owner: zabbix, group: zabbix, mode: '0755' }
 
@@ -184,16 +190,47 @@
     notify: restart zabbix-agent
 
   ######################################################################
-  # 9 · Start services & wait for ports
+  # 9 · Start services and verify zabbix-server bind
   ######################################################################
-  - systemd:
+  - name: Enable & start services
+    systemd:
       name: "{{ item }}"
       state: started
       enabled: yes
     loop: [mariadb, apache2, zabbix-server, zabbix-agent]
 
-  - wait_for: { host: 127.0.0.1, port: 10051, timeout: 90 }
-  - wait_for: { host: 127.0.0.1, port: 80, timeout: 30 }
+  - pause: { seconds: 20 }
+
+  - name: Check zabbix-server unit state
+    shell: systemctl is-active zabbix-server
+    register: zbx_state
+    changed_when: false
+
+  - name: Show zabbix-server logs and fail if not running
+    when: zbx_state.stdout != "active"
+    block:
+      - shell: journalctl -u zabbix-server -n 20 --no-pager
+        register: zbx_logs
+        changed_when: false
+      - debug:
+          msg: |
+            ❌ zabbix-server service is {{ zbx_state.stdout }}.
+            Last 20 log lines:
+            {{ zbx_logs.stdout }}
+      - fail: msg="zabbix-server failed to start. See logs above."
+
+  - name: Detect bind address of port 10051
+    when: zbx_state.stdout == "active"
+    shell: ss -ltnH '( sport = :10051 )' | awk '{print $4}' | head -n1
+    register: zbx_bind
+    changed_when: false
+
+  - name: Wait on detected address / port 10051
+    when: zbx_state.stdout == "active"
+    wait_for:
+      host: "{{ zbx_bind.stdout | default('127.0.0.1') }}"
+      port: 10051
+      timeout: 180
 
   ######################################################################
   # 10 · Summary
