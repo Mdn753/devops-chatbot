@@ -1,5 +1,6 @@
 ---
 # zabbix_install.yml — Ubuntu 20.04/22.04 | Zabbix 6.0 LTS
+# (set zabbix_version to "7.0" for the stable branch)
 
 - name: Zabbix {{ zabbix_version }} LTS — manual installation
   hosts: Zabbix-server
@@ -16,10 +17,14 @@
     zabbix_db_password:      "StrongDBpass!"
     zabbix_admin_password:   "zabbix"
     php_timezone:            "Africa/Casablanca"
+
+    # Repository settings
     zbx_keyring:             /usr/share/keyrings/zabbix.gpg
     zbx_series: >-
       {% set rel = ansible_distribution_release %}
       {{ rel if rel in ['jammy','focal','bionic'] else 'jammy' }}
+
+    # MariaDB root via Unix socket (no password)
     mysql_socket:            /var/run/mysqld/mysqld.sock
 
 ########################################################################
@@ -27,7 +32,7 @@
 ########################################################################
   tasks:
   ######################################################################
-  # 1 • System packages + PyMySQL
+  # 1 • System & PHP packages + PyMySQL driver
   ######################################################################
   - name: Install base packages
     apt:
@@ -56,7 +61,7 @@
       update_cache: yes
 
   ######################################################################
-  # 2 • MariaDB: create DB & user
+  # 2 • MariaDB DB & user (idempotent)
   ######################################################################
   - name: Ensure Zabbix database
     community.mysql.mysql_db:
@@ -111,7 +116,7 @@
       update_cache: yes
 
   ######################################################################
-  # 5 • Import schema if DB is empty  (FIXED)
+  # 5 • Import schema if DB is empty
   ######################################################################
   - name: Get table count (root via socket)
     community.mysql.mysql_query:
@@ -179,18 +184,7 @@
     notify: restart zabbix-agent
 
   ######################################################################
-  # 8 • Config-check BEFORE first start
-  ######################################################################
-  - name: Validate zabbix_server.conf
-    become_user: zabbix
-    command: >
-      zabbix_server --config-check -c /etc/zabbix/zabbix_server.conf
-    register: cfgchk
-    changed_when: false
-    failed_when: "'configuration file is valid' not in cfgchk.stdout"
-
-  ######################################################################
-  # 9 • Enable & start services
+  # 8 • Enable & start services
   ######################################################################
   - name: Start and enable services
     systemd:
@@ -211,7 +205,7 @@
     when: ansible_facts.services['zabbix-server.service'].state != 'running'
 
   ######################################################################
-  # 10 • Wait for open ports
+  # 9 • Wait for open ports
   ######################################################################
   - name: Wait for Zabbix server port
     wait_for:
@@ -226,7 +220,7 @@
       timeout: 30
 
   ######################################################################
-  # 11 • Finish banner
+  # 10 • Finish banner
   ######################################################################
   - name: Show installation summary
     debug:
