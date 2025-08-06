@@ -1,5 +1,5 @@
 ---
-# zabbix_install.yml — Ubuntu 20.04/22.04 | Zabbix 6 LTS
+# zabbix_install.yml — Ubuntu 20.04/22.04 | Zabbix 6.0 LTS
 
 - name: Zabbix {{ zabbix_version }} LTS — manual installation
   hosts: Zabbix-server
@@ -56,7 +56,7 @@
       update_cache: yes
 
   ######################################################################
-  # 2 • MariaDB DB & user
+  # 2 • MariaDB: create DB & user
   ######################################################################
   - name: Ensure Zabbix database
     community.mysql.mysql_db:
@@ -116,16 +116,14 @@
   - name: Get table count (root via socket)
     community.mysql.mysql_query:
       query: |
-        SELECT COUNT(*) AS tcount
-        FROM information_schema.tables
+        SELECT COUNT(*) FROM information_schema.tables
         WHERE table_schema='{{ zabbix_db_name }}';
       login_user: root
       login_unix_socket: "{{ mysql_socket }}"
-      return_dict: yes
     register: tablecount
 
   - name: Import Zabbix schema (first time only)
-    when: (tablecount.query_result[0].tcount | int) == 0
+    when: (tablecount.query_result[0][0] | int) == 0
     shell: |
       for f in schema.sql.gz images.sql.gz data.sql.gz; do
         zcat /usr/share/zabbix-sql-scripts/mysql{{ zabbix_version }}/$f | \
