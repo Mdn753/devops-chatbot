@@ -1,5 +1,4 @@
 ---
-# Direct GNS3 installation without Python environments or PPAs
 - name: Install and configure a standalone GNS3-server
   hosts: gns3-servers
   become: yes

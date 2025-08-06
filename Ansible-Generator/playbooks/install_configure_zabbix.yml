@@ -1,7 +1,7 @@
 ---
 
 - name: Zabbix 6.0 LTS — manual installation
-  hosts: all                
+  hosts: Zabbix-server             
   become: true
   gather_facts: true
 
