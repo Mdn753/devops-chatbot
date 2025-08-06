@@ -3,10 +3,25 @@
   hosts: all
   become: true
 
-  vars:
-    # Must pass in your Zabbix server’s IP or DNS name
-    zbx_server_ip: "{{ zbx_server_ip }}"
+  ####################################################################
+  # PRE-TASK • discover the Zabbix server’s IP from inventory
+  # (runs only once, on the control node)
+  ####################################################################
+  pre_tasks:
+    - name: Resolve zbx_server_ip from inventory
+      set_fact:
+        # ── OPTION A • direct host (simplest) ───────────────────────
+        # zbx_server_ip: "{{ hostvars['=vm-Zabbix'].ansible_host }}"
 
+        # ── OPTION B • first host in group “Zabbix_server” ──────────
+        zbx_server_ip: "{{ hostvars[ groups['Zabbix_server'][0] ].ansible_host }}"
+      when: zbx_server_ip is not defined
+      run_once: true
+      delegate_to: localhost
+
+  ####################################################################
+  # TASKS
+  ####################################################################
   tasks:
     - name: Install Zabbix agent package
       package:
@@ -40,6 +55,9 @@
         state: started
         enabled: yes
 
+  ####################################################################
+  # HANDLERS
+  ####################################################################
   handlers:
     - name: restart zabbix-agent
       service:
