@@ -1,5 +1,5 @@
 ---
-# install_zabbix_fixed_for_2404.yml — Ubuntu 18.04 • 20.04 • 22.04 • 24.04
+# install_zabbix_fixed_for_2404_v2.yml — Ubuntu 18.04 • 20.04 • 22.04 • 24.04
 # Installs Zabbix 7.0 by default. Override: -e zabbix_version=6.0
 
 - name: Install & configure Zabbix {{ zabbix_version }}
@@ -25,18 +25,13 @@
     # List of Ubuntu releases that Zabbix explicitly supports
     supported_releases: ['bionic', 'focal', 'jammy', 'noble'] # Add 'plucky' if/when supported
     # Logic: Use detected release if supported, otherwise fallback strategy
-    zbx_ubuntu_codename: >-
-      {{
-        detected_release if detected_release in supported_releases
-        else 'jammy' # Default fallback
-      }}
+    # Note: Removed inline comment from Jinja2 expression
+    zbx_ubuntu_codename: "{{ detected_release if detected_release in supported_releases else 'jammy' }}"
 
     mysql_socket:            /var/run/mysqld/mysqld.sock
     # Flag to track if we are using the fallback repo
-    using_fallback_repo: >-
-      {{
-        detected_release != zbx_ubuntu_codename
-      }}
+    # Note: Removed inline comment from Jinja2 expression
+    using_fallback_repo: "{{ detected_release != zbx_ubuntu_codename }}"
 
 ########################################################################
 # TASKS
@@ -145,8 +140,8 @@
     apt:
       name: libldap-2.5-0
       state: present
-      # Allow downgrades/pick from specific release if needed
-      # default_release: jammy # This might be needed, test without first
+      # Allow picking from specific release if needed
+      # default_release: jammy # Uncomment if needed and available
     when: using_fallback_repo | bool
 
   ######################################################################
