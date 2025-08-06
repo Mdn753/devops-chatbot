@@ -1,5 +1,5 @@
 ---
-# zabbix_install.yml  —  Ubuntu 20.04/22.04  |  Zabbix 6.0 LTS
+# zabbix_install.yml — Ubuntu 20.04/22.04  |  Zabbix 6.0 LTS (set zabbix_version to "7.0" for the stable line)
 
 - name: Zabbix {{ zabbix_version }} LTS — manual installation
   hosts: Zabbix-server
@@ -7,30 +7,23 @@
   gather_facts: true
 
 ########################################################################
-# 0 • Parameters (override in inventory or --extra-vars if needed)
+# 0 • Parameters (override in inventory or --extra-vars)
 ########################################################################
   vars:
-    # Zabbix branch ("6.0" LTS or "7.0" stable)
-    zabbix_version:          "6.0"
-
-    # DB credentials for the Zabbix application
+    zabbix_version:          "6.0"          # "6.0" LTS or "7.0" stable
     zabbix_db_name:          zabbix
     zabbix_db_user:          zabbix
     zabbix_db_password:      "StrongDBpass!"
-
-    # UI login
     zabbix_admin_password:   "zabbix"
-
-    # PHP
     php_timezone:            "Africa/Casablanca"
 
-    # Repo / key variables
+    # Repository settings
     zbx_keyring:             /usr/share/keyrings/zabbix.gpg
     zbx_series: >-
       {% set rel = ansible_distribution_release %}
       {{ rel if rel in ['jammy','focal','bionic'] else 'jammy' }}
 
-    # MariaDB root access (socket auth, no password)
+    # MariaDB root via Unix socket (no password needed)
     mysql_socket:            /var/run/mysqld/mysqld.sock
 
 ########################################################################
@@ -67,7 +60,7 @@
       update_cache: yes
 
   ######################################################################
-  # 2 • MariaDB: create DB & user (idempotent)
+  # 2 • MariaDB: create DB & user
   ######################################################################
   - name: Ensure Zabbix database
     community.mysql.mysql_db:
@@ -124,11 +117,11 @@
   ######################################################################
   # 5 • Import schema if DB is empty
   ######################################################################
-  - name: Get table count
+  - name: Get table count (run as root via socket)
     community.mysql.mysql_info:
       filter: table_count
-      login_user: "{{ zabbix_db_user }}"
-      login_password: "{{ zabbix_db_password }}"
+      login_user: root
+      login_unix_socket: "{{ mysql_socket }}"
       login_db: "{{ zabbix_db_name }}"
     register: dbinfo
 
@@ -221,7 +214,7 @@
     when: ansible_facts.services['zabbix-server.service'].state != 'running'
 
   ######################################################################
-  # 10 • Wait for open ports (network layer)
+  # 10 • Wait for open ports
   ######################################################################
   - name: Wait for Zabbix server port
     wait_for:
