@@ -1,7 +1,8 @@
 ---
-# install_zabbix.yml ─ Ubuntu 18.04 • 20.04 • 22.04
-# Installs Zabbix 6.0 LTS by default; set zabbix_version=7.0 for the stable line
-# ------------------------------------------------------------------------------
+# install_zabbix.yml ─ Ubuntu 18.04 · 20.04 · 22.04
+# --------------------------------------------------
+# Run with:  ansible-playbook install_zabbix.yml
+#            ansible-playbook install_zabbix.yml -e zabbix_version=7.0
 
 - name: Install & configure Zabbix {{ zabbix_version }}
   hosts: Zabbix-server
@@ -9,23 +10,21 @@
   gather_facts: true
 
 ########################################################################
-# 0 • Variables (override via inventory / --extra-vars as needed)
+# 0 · Variables
 ########################################################################
   vars:
-    zabbix_version:          "6.0"               # "6.0" LTS  or "7.0" stable
+    zabbix_version:          "6.0"           # "6.0" LTS  or  "7.0" stable
     zabbix_db_name:          zabbix
     zabbix_db_user:          zabbix
     zabbix_db_password:      "StrongDBpass!"
     zabbix_admin_password:   "zabbix"
     php_timezone:            "Africa/Casablanca"
 
-    # Zabbix repo settings
     zbx_keyring:             /usr/share/keyrings/zabbix.gpg
     zbx_series: >-
       {% set rel = ansible_distribution_release %}
       {{ rel if rel in ['jammy','focal','bionic'] else 'jammy' }}
 
-    # MariaDB root connection (socket, no password)
     mysql_socket:            /var/run/mysqld/mysqld.sock
 
 ########################################################################
@@ -33,7 +32,7 @@
 ########################################################################
   tasks:
   ######################################################################
-  # 1 • Base OS & PHP packages (+ PyMySQL driver)
+  # 1 · Base packages + PyMySQL driver
   ######################################################################
   - name: Install required packages
     apt:
@@ -51,12 +50,12 @@
         - gnupg
         - lsb-release
         - ca-certificates
-        - python3-pymysql          # MySQL driver for Ansible
+        - python3-pymysql
       state: present
       update_cache: yes
 
   ######################################################################
-  # 2 • MariaDB – create database and user
+  # 2 · MariaDB – database & user
   ######################################################################
   - name: Create Zabbix database
     community.mysql.mysql_db:
@@ -78,7 +77,7 @@
       login_unix_socket: "{{ mysql_socket }}"
 
   ######################################################################
-  # 3 • Add the official Zabbix repository
+  # 3 · Official Zabbix repo
   ######################################################################
   - name: Import Zabbix GPG key
     shell: |
@@ -97,7 +96,7 @@
       update_cache: yes
 
   ######################################################################
-  # 4 • Install Zabbix packages
+  # 4 · Install Zabbix packages
   ######################################################################
   - name: Install Zabbix server, frontend & agent
     apt:
@@ -111,11 +110,10 @@
       update_cache: yes
 
   ######################################################################
-  # 5 • Locate SQL scripts directory (works for any package layout)
+  # 5 · Locate SQL scripts directory (robust)
   ######################################################################
-  - name: Locate schema.sql(.gz) on the host
+  - name: Locate schema.sql(.gz) anywhere under /usr/share*
     shell: |
-      set -o pipefail
       find /usr/share /usr/share/doc -type f -path '*zabbix*sql*' \
            -name 'schema.sql*' -print -quit
     register: sql_schema_path
@@ -128,7 +126,7 @@
       zbx_sql_dir: "{{ sql_schema_path.stdout | dirname }}"
 
   ######################################################################
-  # 6 • Import schema if the database is empty
+  # 6 · Import schema if DB is empty
   ######################################################################
   - name: Count current tables
     community.mysql.mysql_query:
@@ -139,29 +137,36 @@
       login_unix_socket: "{{ mysql_socket }}"
     register: tablecount
 
-  - name: Import Zabbix schema (first run only)
+  - name: Gather file stats for candidate SQL files
     when: (tablecount.query_result[0][0] | int) == 0
-    block:
-      - name: Import SQL files
-        loop:
-          - schema.sql.gz
-          - schema.sql
-          - images.sql.gz
-          - images.sql
-          - data.sql.gz
-          - data.sql
-        loop_control: { loop_var: sqlfile }
-        when: "{{ lookup('ansible.builtin.filepath', zbx_sql_dir ~ '/' ~ sqlfile, errors='ignore') is not none }}"
-        mysql_db:
-          name: "{{ zabbix_db_name }}"
-          state: import
-          target: "{{ zbx_sql_dir }}/{{ sqlfile }}"
-          login_user: "{{ zabbix_db_user }}"
-          login_password: "{{ zabbix_db_password }}"
-          login_host: localhost
+    stat:
+      path: "{{ zbx_sql_dir }}/{{ item }}"
+    register: sql_stats
+    loop:
+      - schema.sql.gz
+      - schema.sql
+      - images.sql.gz
+      - images.sql
+      - data.sql.gz
+      - data.sql
+    loop_control: { label: "{{ item }}" }
+
+  - name: Import existing SQL files
+    when:
+      - (tablecount.query_result[0][0] | int) == 0
+      - item.stat.exists
+    loop: "{{ sql_stats.results }}"
+    loop_control: { label: "{{ item.stat.path | basename }}" }
+    mysql_db:
+      name: "{{ zabbix_db_name }}"
+      state: import
+      target: "{{ item.stat.path }}"
+      login_user: "{{ zabbix_db_user }}"
+      login_password: "{{ zabbix_db_password }}"
+      login_host: localhost
 
   ######################################################################
-  # 7 • Configure Zabbix server & PHP
+  # 7 · Configure server & PHP
   ######################################################################
   - name: Configure /etc/zabbix/zabbix_server.conf
     lineinfile:
@@ -176,7 +181,7 @@
       - { regexp: '^#?PidFile=',    line: 'PidFile=/run/zabbix/zabbix_server.pid' }
     notify: restart zabbix-server
 
-  - name: Configure PHP timezone
+  - name: Set PHP timezone
     lineinfile:
       path: /etc/zabbix/apache.conf
       regexp: '^\s*#?\s*php_value date.timezone'
@@ -184,9 +189,9 @@
     notify: restart apache
 
   ######################################################################
-  # 8 • Runtime directory & agent hostname
+  # 8 · Runtime directory & agent Hostname
   ######################################################################
-  - name: Ensure /run/zabbix directory exists
+  - name: Ensure /run/zabbix exists
     file:
       path: /run/zabbix
       state: directory
@@ -202,18 +207,14 @@
     notify: restart zabbix-agent
 
   ######################################################################
-  # 9 • Enable and start services; wait for ports
+  # 9 · Start services and wait for ports
   ######################################################################
   - name: Enable & start services
     systemd:
       name: "{{ item }}"
       state: started
       enabled: yes
-    loop:
-      - mariadb
-      - apache2
-      - zabbix-server
-      - zabbix-agent
+    loop: [mariadb, apache2, zabbix-server, zabbix-agent]
 
   - name: Wait for Zabbix server port
     wait_for:
@@ -228,7 +229,7 @@
       timeout: 30
 
   ######################################################################
-  # 10 • Finish banner
+  # 10 · Summary
   ######################################################################
   - name: Installation summary
     debug:
