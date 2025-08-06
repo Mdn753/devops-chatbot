@@ -1,6 +1,6 @@
 ---
-# install_zabbix.yml — Ubuntu 18.04 • 20.04 • 22.04
-# Installs Zabbix 6.0 LTS by default.  Override:  -e zabbix_version=7.0
+# install_zabbix_fixed.yml — Ubuntu 18.04 • 20.04 • 22.04
+# Installs Zabbix 6.0 LTS or 7.0 by default.  Override:  -e zabbix_version=7.0
 
 - name: Install & configure Zabbix {{ zabbix_version }}
   hosts: Zabbix-server
@@ -11,7 +11,7 @@
 # 0 · Variables
 ########################################################################
   vars:
-    zabbix_version:          "6.0"          # "6.0" LTS or "7.0" stable
+    zabbix_version:          "7.0"          # "6.0" LTS or "7.0" stable
     zabbix_db_name:          zabbix
     zabbix_db_user:          zabbix
     zabbix_db_password:      "StrongDBpass!"
@@ -49,12 +49,26 @@
         - lsb-release
         - ca-certificates
         - python3-pymysql
+        - python3-mysqldb # Ensure MySQLdb Python module is available
       state: present
       update_cache: yes
 
   ######################################################################
   # 2 · MariaDB database & user
   ######################################################################
+  - name: Ensure MariaDB service is started and enabled
+    systemd:
+      name: mariadb
+      state: started
+      enabled: yes
+
+  - name: Wait for MariaDB port 3306 to be available
+    wait_for:
+      host: localhost
+      port: 3306
+      state: started
+      timeout: 30
+
   - name: Create Zabbix database
     community.mysql.mysql_db:
       name: "{{ zabbix_db_name }}"
@@ -79,7 +93,7 @@
   ######################################################################
   - name: Import Zabbix GPG key
     shell: |
-      curl -fsSL https://repo.zabbix.com/zabbix-official-repo.key |
+      curl -fsSL https://repo.zabbix.com/zabbix-official-repo.key   |
       gpg --dearmor -o {{ zbx_keyring }}
     args: { creates: "{{ zbx_keyring }}" }
 
@@ -87,7 +101,7 @@
     apt_repository:
       repo: >-
         deb [arch=amd64 signed-by={{ zbx_keyring }}]
-        https://repo.zabbix.com/zabbix/{{ zabbix_version }}/ubuntu
+        https://repo.zabbix.com/zabbix/  {{ zabbix_version }}/ubuntu
         {{ zbx_series }} main
       filename: zabbix
       state: present
@@ -108,7 +122,7 @@
       update_cache: yes
 
   ######################################################################
-  # 5 · Locate SQL scripts directory
+  # 5 · Locate SQL scripts directory & Import schema
   ######################################################################
   - name: Locate schema.sql(.gz)
     shell: |
@@ -120,41 +134,95 @@
     failed_when: sql_schema_path.stdout == ""
     args: { executable: /bin/bash }
 
-  - set_fact:
+  - name: Set SQL directory fact
+    set_fact:
       zbx_sql_dir: "{{ sql_schema_path.stdout | dirname }}"
 
-  ######################################################################
-  # 6 · Import schema once
-  ######################################################################
-  - name: Count tables
+  - name: Count tables in Zabbix database
     community.mysql.mysql_query:
-      query: SELECT COUNT(*) FROM information_schema.tables
-             WHERE table_schema='{{ zabbix_db_name }}';
+      query: SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='{{ zabbix_db_name }}';
       login_user: root
       login_unix_socket: "{{ mysql_socket }}"
     register: tablecount
 
-  - name: Build list of SQL files present
+  - name: Import Zabbix SQL schema, images, and data if database is empty
     when: tablecount.query_result[0][0]|int == 0
-    set_fact:
-      sql_files: "{{ query('ansible.builtin.fileglob',
-                           zbx_sql_dir ~ '/*{schema,images,data}.sql*') }}"
+    block:
+      # --- Decompress and Import Schema ---
+      - name: Check if schema.sql.gz exists
+        stat:
+          path: "{{ zbx_sql_dir }}/schema.sql.gz"
+        register: schema_gz_stat
 
-  - name: Import SQL files
-    when:
-      - tablecount.query_result[0][0]|int == 0
-      - sql_files | length > 0
-    shell: |
-      if [[ "{{ item }}" == *.gz ]]; then
-        zcat "{{ item }}" | mysql -u{{ zabbix_db_user }} -p{{ zabbix_db_password }} {{ zabbix_db_name }}
-      else
-        mysql -u{{ zabbix_db_user }} -p{{ zabbix_db_password }} {{ zabbix_db_name }} < "{{ item }}"
-      fi
-    args: { executable: /bin/bash }
-    loop: "{{ sql_files }}"
+      - name: Decompress schema.sql.gz if it exists
+        command: gunzip -k {{ zbx_sql_dir }}/schema.sql.gz
+        when: schema_gz_stat.stat.exists
+
+      - name: Determine schema.sql path (compressed or not)
+        set_fact:
+          schema_sql_path: "{{ zbx_sql_dir }}/schema.sql"
+
+      - name: Import schema.sql
+        community.mysql.mysql_db:
+          name: "{{ zabbix_db_name }}"
+          state: import
+          target: "{{ schema_sql_path }}"
+          login_user: "{{ zabbix_db_user }}"
+          login_password: "{{ zabbix_db_password }}"
+          login_unix_socket: "{{ mysql_socket }}"
+
+      # --- Decompress and Import Images ---
+      - name: Check if images.sql.gz exists
+        stat:
+          path: "{{ zbx_sql_dir }}/images.sql.gz"
+        register: images_gz_stat
+
+      - name: Decompress images.sql.gz if it exists
+        command: gunzip -k {{ zbx_sql_dir }}/images.sql.gz
+        when: images_gz_stat.stat.exists
+
+      - name: Determine images.sql path (compressed or not)
+        set_fact:
+          images_sql_path: "{{ zbx_sql_dir }}/images.sql"
+        when: images_gz_stat.stat.exists or (zbx_sql_dir + '/images.sql') is file
+
+      - name: Import images.sql (if exists)
+        community.mysql.mysql_db:
+          name: "{{ zabbix_db_name }}"
+          state: import
+          target: "{{ images_sql_path }}"
+          login_user: "{{ zabbix_db_user }}"
+          login_password: "{{ zabbix_db_password }}"
+          login_unix_socket: "{{ mysql_socket }}"
+        when: images_gz_stat.stat.exists or (zbx_sql_dir + '/images.sql') is file
+
+      # --- Decompress and Import Data ---
+      - name: Check if data.sql.gz exists
+        stat:
+          path: "{{ zbx_sql_dir }}/data.sql.gz"
+        register: data_gz_stat
+
+      - name: Decompress data.sql.gz if it exists
+        command: gunzip -k {{ zbx_sql_dir }}/data.sql.gz
+        when: data_gz_stat.stat.exists
+
+      - name: Determine data.sql path (compressed or not)
+        set_fact:
+          data_sql_path: "{{ zbx_sql_dir }}/data.sql"
+        when: data_gz_stat.stat.exists or (zbx_sql_dir + '/data.sql') is file
+
+      - name: Import data.sql (if exists)
+        community.mysql.mysql_db:
+          name: "{{ zabbix_db_name }}"
+          state: import
+          target: "{{ data_sql_path }}"
+          login_user: "{{ zabbix_db_user }}"
+          login_password: "{{ zabbix_db_password }}"
+          login_unix_socket: "{{ mysql_socket }}"
+        when: data_gz_stat.stat.exists or (zbx_sql_dir + '/data.sql') is file
 
   ######################################################################
-  # 7 · Configure server & PHP
+  # 6 · Configure server & PHP
   ######################################################################
   - name: Configure zabbix_server.conf
     lineinfile:
@@ -177,45 +245,73 @@
     notify: restart apache
 
   ######################################################################
-  # 8 · Runtime dir & agent Hostname
+  # 7 · Runtime dir & agent Hostname
   ######################################################################
-  - file: { path: /run/zabbix, state: directory, owner: zabbix, group: zabbix, mode: '0755' }
+  - name: Create Zabbix runtime directory
+    file:
+      path: /run/zabbix
+      state: directory
+      owner: zabbix
+      group: zabbix
+      mode: '0755'
 
-  - lineinfile:
+  - name: Configure Zabbix agent hostname
+    lineinfile:
       path: /etc/zabbix/zabbix_agentd.conf
       regexp: '^Hostname='
       line: "Hostname={{ inventory_hostname }}"
     notify: restart zabbix-agent
 
   ######################################################################
-  # 9 · Start services and health-check
+  # 8 · Flush handlers to apply config changes
   ######################################################################
-  - systemd:
+  - name: Flush handlers to restart services if config changed
+    meta: flush_handlers
+
+  ######################################################################
+  # 9 · Start services explicitly
+  ######################################################################
+  # Ensure services are started *after* potential restarts from handlers
+  - name: Ensure required services are started and enabled
+    systemd:
       name: "{{ item }}"
       state: started
       enabled: yes
-    loop: [mariadb, apache2, zabbix-server, zabbix-agent]
+    loop:
+      - mariadb
+      - apache2
+      - zabbix-server # Explicitly start after config & DB
+      - zabbix-agent
 
-  - pause: { seconds: 20 }
+  ######################################################################
+  # 10 · Health-checks
+  ######################################################################
+  - name: Pause to allow services to stabilize
+    pause:
+      seconds: 20
 
   - name: Check zabbix-server unit state
     shell: systemctl is-active zabbix-server
     register: zbx_state
     changed_when: false
-    failed_when: false           # ← ignore non-zero RC
+    failed_when: false # ← ignore non-zero RC initially
 
   - name: Show logs and fail if not running
     when: zbx_state.stdout != "active"
     block:
-      - shell: journalctl -u zabbix-server -n 20 --no-pager
+      - name: Get recent zabbix-server logs
+        shell: journalctl -u zabbix-server -n 20 --no-pager
         register: zbx_logs
         changed_when: false
-      - debug:
+      - name: Display zabbix-server failure logs
+        debug:
           msg: |
             ❌ zabbix-server service is {{ zbx_state.stdout }}.
             Last 20 log lines:
             {{ zbx_logs.stdout }}
-      - fail: msg="zabbix-server failed to start. See logs above."
+      - name: Fail the playbook due to zabbix-server startup failure
+        fail:
+          msg: "zabbix-server failed to start. See logs above."
 
   - name: Detect bind address of port 10051
     when: zbx_state.stdout == "active"
@@ -223,7 +319,7 @@
     register: zbx_bind
     changed_when: false
 
-  - name: Wait on detected address / port 10051
+  - name: Wait for Zabbix server to bind to port 10051
     when: zbx_state.stdout == "active"
     wait_for:
       host: "{{ zbx_bind.stdout | default('127.0.0.1') }}"
@@ -231,9 +327,10 @@
       timeout: 180
 
   ######################################################################
-  # 10 · Summary
+  # 11 · Summary
   ######################################################################
-  - debug:
+  - name: Display Installation Success Summary
+    debug:
       msg: |
         ================================================
         ✅ Zabbix {{ zabbix_version }} installed!
@@ -243,14 +340,22 @@
         ================================================
 
 ########################################################################
-# HANDLERS
+# HANDLERS (Flushed explicitly)
 ########################################################################
+# Handlers are triggered by 'notify' and flushed by 'meta: flush_handlers'
+# This ensures services are restarted *before* the explicit start tasks.
   handlers:
     - name: restart zabbix-server
-      systemd: { name: zabbix-server, state: restarted }
+      systemd:
+        name: zabbix-server
+        state: restarted
 
     - name: restart zabbix-agent
-      systemd: { name: zabbix-agent, state: restarted }
+      systemd:
+        name: zabbix-agent
+        state: restarted
 
     - name: restart apache
-      systemd: { name: apache2, state: restarted }
+      systemd:
+        name: apache2
+        state: restarted
