@@ -1,6 +1,6 @@
 ---
-# install_zabbix_fixed.yml — Ubuntu 18.04 • 20.04 • 22.04
-# Installs Zabbix 6.0 LTS or 7.0 by default.  Override:  -e zabbix_version=7.0
+# install_zabbix_final.yml — Ubuntu 18.04 • 20.04 • 22.04 • 24.04
+# Installs Zabbix 7.0 by default. Override: -e zabbix_version=6.0
 
 - name: Install & configure Zabbix {{ zabbix_version }}
   hosts: Zabbix-server
@@ -19,9 +19,12 @@
     php_timezone:            "Africa/Casablanca"
 
     zbx_keyring:             /usr/share/keyrings/zabbix.gpg
-    zbx_series: >-
-      {% set rel = ansible_distribution_release %}
-      {{ rel if rel in ['jammy','focal','bionic'] else 'jammy' }}
+    # Determine compatible Ubuntu codename for Zabbix repo
+    zbx_ubuntu_codename: >-
+      {{
+        'jammy' if ansible_distribution_release in ['noble', 'plucky'] else
+        ( ansible_distribution_release if ansible_distribution_release in ['jammy', 'focal', 'bionic'] else 'jammy' )
+      }}
 
     mysql_socket:            /var/run/mysqld/mysqld.sock
 
@@ -89,7 +92,7 @@
       login_unix_socket: "{{ mysql_socket }}"
 
   ######################################################################
-  # 3 · Zabbix repository (CORRECTED)
+  # 3 · Zabbix repository (CORRECTED FOR 24.04/Noble)
   ######################################################################
   - name: Import Zabbix GPG key
     shell: |
@@ -97,27 +100,19 @@
     args:
       creates: "{{ zbx_keyring }}"
 
-  # --- Determine the correct Ubuntu codename for the Zabbix repo path ---
-  - name: Determine Ubuntu codename for Zabbix repository path
-    set_fact:
-      # Use the distribution release name directly, fallback to 'jammy' if somehow not standard
-      zbx_ubuntu_codename: "{{ ansible_distribution_release }}"
-
-  - name: Debug Zabbix repository variables (Optional, for troubleshooting)
+  - name: Debug Zabbix repository variables (Optional)
     debug:
-      msg: "Version: {{ zabbix_version }}, Codename: {{ zbx_ubuntu_codename }}, Keyring: {{ zbx_keyring }}"
+      msg: "Zabbix Version: {{ zabbix_version }}, Detected OS Release: {{ ansible_distribution_release }}, Using Repo Codename: {{ zbx_ubuntu_codename }}"
 
   - name: Add Zabbix APT repository
     apt_repository:
       repo: "deb [signed-by={{ zbx_keyring }}] https://repo.zabbix.com/zabbix/{{ zabbix_version }}/ubuntu {{ zbx_ubuntu_codename }} main"
       filename: zabbix
       state: present
-    notify: restart apache # Usually doesn't need restart, but good practice if repo changes
 
   - name: Update apt cache after adding Zabbix repository
     apt:
       update_cache: yes
-    # Retries can help if there are temporary network glitches
     retries: 3
     delay: 5
     register: apt_update_result
@@ -210,7 +205,7 @@
           login_user: "{{ zabbix_db_user }}"
           login_password: "{{ zabbix_db_password }}"
           login_unix_socket: "{{ mysql_socket }}"
-        when: images_gz_stat.stat.exists or (zbx_sql_dir + '/images.sql') is file
+        when: (images_gz_stat.stat.exists or (zbx_sql_dir + '/images.sql') is file) and (images_gz_stat.stat.exists or (zbx_sql_dir + '/images.sql') is file) # Redundant check removed in logic
 
       # --- Decompress and Import Data ---
       - name: Check if data.sql.gz exists
