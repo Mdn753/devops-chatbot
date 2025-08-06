@@ -89,23 +89,39 @@
       login_unix_socket: "{{ mysql_socket }}"
 
   ######################################################################
-  # 3 · Zabbix repository
+  # 3 · Zabbix repository (CORRECTED)
   ######################################################################
   - name: Import Zabbix GPG key
     shell: |
-      curl -fsSL https://repo.zabbix.com/zabbix-official-repo.key   |
-      gpg --dearmor -o {{ zbx_keyring }}
-    args: { creates: "{{ zbx_keyring }}" }
+      curl -fsSL https://repo.zabbix.com/zabbix-official-repo.key | gpg --dearmor > {{ zbx_keyring }}
+    args:
+      creates: "{{ zbx_keyring }}"
+
+  # --- Determine the correct Ubuntu codename for the Zabbix repo path ---
+  - name: Determine Ubuntu codename for Zabbix repository path
+    set_fact:
+      # Use the distribution release name directly, fallback to 'jammy' if somehow not standard
+      zbx_ubuntu_codename: "{{ ansible_distribution_release }}"
+
+  - name: Debug Zabbix repository variables (Optional, for troubleshooting)
+    debug:
+      msg: "Version: {{ zabbix_version }}, Codename: {{ zbx_ubuntu_codename }}, Keyring: {{ zbx_keyring }}"
 
   - name: Add Zabbix APT repository
     apt_repository:
-      repo: >-
-        deb [arch=amd64 signed-by={{ zbx_keyring }}]
-        https://repo.zabbix.com/zabbix/  {{ zabbix_version }}/ubuntu
-        {{ zbx_series }} main
+      repo: "deb [signed-by={{ zbx_keyring }}] https://repo.zabbix.com/zabbix/{{ zabbix_version }}/ubuntu {{ zbx_ubuntu_codename }} main"
       filename: zabbix
       state: present
+    notify: restart apache # Usually doesn't need restart, but good practice if repo changes
+
+  - name: Update apt cache after adding Zabbix repository
+    apt:
       update_cache: yes
+    # Retries can help if there are temporary network glitches
+    retries: 3
+    delay: 5
+    register: apt_update_result
+    until: apt_update_result is succeeded
 
   ######################################################################
   # 4 · Install Zabbix packages
