@@ -17,14 +17,12 @@
           Inventory group “Zabbix-server” is missing or has no hosts.
           Cannot derive zbx_api_url automatically.
 
-    - name: Derive API URL when missing or blank
+    - name: Derive API URL only if caller didn’t supply one
       set_fact:
-        zbx_api_url: >-
-          http://{{ hostvars[ groups['Zabbix-server'][0] ].ansible_host }}/zabbix/api_jsonrpc.php
-      when: (zbx_api_url | default('')) | length == 0
+        zbx_api_url: "http://{{ hostvars[ groups['Zabbix-server'][0] ].ansible_host }}/zabbix/api_jsonrpc.php"
+      when: (vars.get('zbx_api_url', '') | length) == 0   # ← raw check, no templating
       run_once: true
       delegate_to: localhost
-
 
   vars:
     # Zabbix API connection (pass these via extra_vars)
