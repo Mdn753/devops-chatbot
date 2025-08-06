@@ -1,5 +1,5 @@
 ---
-# zabbix_install.yml  —  Ubuntu 20.04/22.04 + Zabbix 6 LTS
+# zabbix_install.yml  —  Ubuntu 20.04/22.04  |  Zabbix 6.0 LTS
 
 - name: Zabbix {{ zabbix_version }} LTS — manual installation
   hosts: Zabbix-server
@@ -7,28 +7,40 @@
   gather_facts: true
 
 ########################################################################
-# 0 • Parameters
+# 0 • Parameters (override in inventory or --extra-vars if needed)
 ########################################################################
   vars:
-    zabbix_version:          "6.0"           # set to "7.0" for the stable line
+    # Zabbix branch ("6.0" LTS or "7.0" stable)
+    zabbix_version:          "6.0"
+
+    # DB credentials for the Zabbix application
     zabbix_db_name:          zabbix
     zabbix_db_user:          zabbix
     zabbix_db_password:      "StrongDBpass!"
+
+    # UI login
     zabbix_admin_password:   "zabbix"
+
+    # PHP
     php_timezone:            "Africa/Casablanca"
+
+    # Repo / key variables
     zbx_keyring:             /usr/share/keyrings/zabbix.gpg
     zbx_series: >-
       {% set rel = ansible_distribution_release %}
       {{ rel if rel in ['jammy','focal','bionic'] else 'jammy' }}
+
+    # MariaDB root access (socket auth, no password)
+    mysql_socket:            /var/run/mysqld/mysqld.sock
 
 ########################################################################
 # TASKS
 ########################################################################
   tasks:
   ######################################################################
-  # 1 • Base packages (MariaDB, Apache/PHP) + PyMySQL driver
+  # 1 • Base packages + PyMySQL driver
   ######################################################################
-  - name: Install base packages
+  - name: Install system & PHP packages
     apt:
       name:
         - mariadb-server
@@ -47,9 +59,8 @@
         - ca-certificates
       state: present
       update_cache: yes
-    when: ansible_os_family == "Debian"
 
-  - name: Install PyMySQL so Ansible can talk to MariaDB   # <─ NEW
+  - name: Install PyMySQL (MySQL driver for Ansible)
     apt:
       name: python3-pymysql
       state: present
@@ -64,6 +75,8 @@
       state: present
       encoding: utf8mb4
       collation: utf8mb4_bin
+      login_user: root
+      login_unix_socket: "{{ mysql_socket }}"
 
   - name: Ensure Zabbix DB user
     community.mysql.mysql_user:
@@ -72,6 +85,8 @@
       password: "{{ zabbix_db_password }}"
       priv: "{{ zabbix_db_name }}.*:ALL"
       state: present
+      login_user: root
+      login_unix_socket: "{{ mysql_socket }}"
 
   ######################################################################
   # 3 • Add official Zabbix repo
@@ -130,7 +145,7 @@
   ######################################################################
   # 6 • Configure zabbix_server.conf & PHP timezone
   ######################################################################
-  - name: Configure Zabbix server connection parameters
+  - name: Configure Zabbix server DB parameters
     lineinfile:
       path: /etc/zabbix/zabbix_server.conf
       regexp: "{{ item.regexp }}"
@@ -154,7 +169,7 @@
   ######################################################################
   # 7 • Agent hostname sanitisation
   ######################################################################
-  - name: Derive clean Zabbix agent hostname
+  - name: Derive clean agent Hostname
     set_fact:
       zbx_agent_hostname: >-
         {{
