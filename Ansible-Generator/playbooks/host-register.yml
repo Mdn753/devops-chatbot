@@ -10,27 +10,26 @@
   # PRE-TASK • build zbx_api_url from group “Zabbix_server”
   ##################################################################
   pre_tasks:
-    - name: Fail early if group Zabbix_server is missing or empty
+    - name: Fail early if group is missing or empty
       assert:
         that:
           - "'Zabbix_server' in groups"
           - groups['Zabbix_server'] | length > 0
-        fail_msg: |
-          Inventory group “Zabbix_server” is missing or contains no hosts.
-          Cannot derive zbx_api_url automatically.
+        fail_msg: >
+          Inventory group “Zabbix_server” is missing or empty —
+          cannot derive zbx_api_url automatically.
 
-    - name: Derive API URL once (only when caller did not supply it)
+    - name: Derive API URL once (only when caller didn't supply it)
       set_fact:
-        zbx_api_url: >-
+        zbx_api_url: >
           http://{{ hostvars[ groups['Zabbix_server'][0] ].ansible_host }}/zabbix/api_jsonrpc.php
-      when: (vars.get('zbx_api_url', '') | length) == 0       # raw check → no recursion
+      when: (vars.get('zbx_api_url', '') | length) == 0   # raw check – no recursion
       run_once: true
       delegate_to: localhost
 
 
   vars:
     # Zabbix API connection (pass these via extra_vars)
-    zbx_api_url:       "{{ zbx_api_url }}"
     zbx_api_user:      "ansible"
     zbx_api_password:  "{{ zbx_api_password | default(omit) }}"
 
