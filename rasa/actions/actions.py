@@ -30,10 +30,16 @@ import os, requests
 from random import randint
 from rasa_sdk import Action, Tracker
 from rasa_sdk.executor import CollectingDispatcher
+from typing import Any, Dict, List
 
 N8N_URL = os.getenv("N8N_WEBHOOK_URL",
                     "http://host.docker.internal:5678/webhook-test/create_vm")
 
+
+N8N_ZABBIX_URL = os.getenv(
+    "N8N_ZABBIX_URL",
+    "http://host.docker.internal:5678/webhook-test/zabbix_setup",
+)
 class ActionCreateVM(Action):
     def name(self):
         return "action_create_vm"
@@ -46,3 +52,42 @@ class ActionCreateVM(Action):
                              f"Launching {vm_name} …"))
         return []
 
+class ActionSetupZabbix(Action):
+    def name(self) -> str:
+        return "action_setup_zabbix"
+
+    async def run(
+        self,
+        dispatcher: CollectingDispatcher,
+        tracker: Tracker,
+        domain: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+
+        # Optional: pass a target (vm/group) if you capture it in a slot
+        target = tracker.get_slot("target") or "all"
+
+        # (Optional) show immediate feedback
+        dispatcher.utter_message("Kicking off Zabbix setup…")
+
+        try:
+            payload = {"target": target}
+            r = requests.post(N8N_ZABBIX_URL, json=payload, timeout=30)
+
+            if r.ok:
+                # Try to show message from n8n response if it's JSON
+                msg = None
+                try:
+                    msg = r.json().get("message")
+                except Exception:
+                    msg = r.text[:200] if r.text else None
+
+                dispatcher.utter_message(msg or f"Zabbix setup triggered for '{target}'.")
+            else:
+                dispatcher.utter_message(
+                    f"Failed to trigger workflow ({r.status_code})."
+                )
+
+        except Exception as e:
+            dispatcher.utter_message(f"Could not reach the automation: {e}")
+
+        return []

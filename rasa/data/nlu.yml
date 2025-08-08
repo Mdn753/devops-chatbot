@@ -15,3 +15,12 @@ nlu:
     - create an ubuntu vm
     - launch a fresh virtual machine
     - spin up dev-vm01
+
+- intent: setup_zabbix
+  examples: |
+    - set up zabbix
+    - install and configure zabbix
+    - provision zabbix on my server
+    - configure monitoring with zabbix
+    - bootstrap zabbix
+    - deploy zabbix

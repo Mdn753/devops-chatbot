@@ -3,13 +3,17 @@ version: "3.1"
 intents:
   - greet
   - create_vm
+  - setup_zabbix
 
 responses:
   utter_greet:
     - text: "Hi! How can I help you?"
+  utter_setup_zabbix_started:
+    - text: "Kicking off Zabbix setup…"
 
 actions:
   - action_create_vm
+  - action_setup_zabbix
 
 
 session_config:

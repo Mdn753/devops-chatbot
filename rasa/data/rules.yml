@@ -5,3 +5,7 @@ rules:
   steps:
   - intent: create_vm
   - action: action_create_vm
+- rule: trigger zabbix setup
+  steps:
+    - intent: setup_zabbix
+    - action: action_setup_zabbix
