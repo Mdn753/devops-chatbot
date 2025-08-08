@@ -10,11 +10,16 @@
   vars:
     # ===== Versions & Paths =====
     java_pkg: openjdk-17-jdk
-    wildfly_version: "30.0.1.Final"          # pin as you like
+
+    # Use a WildFly version that actually exists on GitHub Releases
+    wildfly_version: "36.0.1.Final"                # you can bump to "37.0.0.Final"
+    wildfly_tarball: "wildfly-{{ wildfly_version }}.tar.gz"
+    wildfly_url: "https://github.com/wildfly/wildfly/releases/download/{{ wildfly_version }}/{{ wildfly_tarball }}"
+
     wildfly_user: "wildfly"
     wildfly_group: "wildfly"
-    wildfly_home: "/opt/wildfly"             # symlink to /opt/wildfly-<version>
-    wildfly_bind: "0.0.0.0"                  # listen on all interfaces
+    wildfly_home: "/opt/wildfly"                   # symlink to /opt/wildfly-<version>
+    wildfly_bind: "0.0.0.0"                        # listen on all interfaces
     wildfly_http_port: 8080
     wildfly_https_port: 8443
 
@@ -23,13 +28,13 @@
 
     # MariaDB JDBC driver (WildFly module)
     mariadb_driver_version: "3.4.1"
-    mariadb_driver_url: "https://repo1.maven.org/maven2/org/mariadb/jdbc/mariadb-java-client/3.4.1/mariadb-java-client-3.4.1.jar"
+    mariadb_driver_url: "https://repo1.maven.org/maven2/org/mariadb/jdbc/mariadb-java-client/{{ mariadb_driver_version }}/mariadb-java-client-{{ mariadb_driver_version }}.jar"
     mariadb_module_name: "org.mariadb"
 
     # ===== Database for EJBCA =====
     db_name: "ejbca"
     db_user: "ejbca"
-    db_password: "ChangeMeStrong!"           # change via AWX/Vault
+    db_password: "ChangeMeStrong!"                 # put in AWX/Vault in real use
     db_host: "127.0.0.1"
     db_port: 3306
 
@@ -44,7 +49,7 @@
 
   tasks:
     # -------------------- Base packages --------------------
-    - name: Install base packages (Java, build tools, DB client, unzip)
+    - name: Install base packages (Java, tools, DB server, unzip)
       ansible.builtin.apt:
         name:
           - "{{ java_pkg }}"
@@ -55,7 +60,7 @@
           - git
           - python3-pip
           - mariadb-server
-          - python3-pymysql     # for community.mysql modules
+          - python3-pymysql          # for community.mysql modules
         state: present
         update_cache: yes
 
@@ -93,18 +98,19 @@
         name: "{{ wildfly_user }}"
         group: "{{ wildfly_group }}"
         create_home: no
-        shell: /usr/sbin/nologin    # Ubuntu path
+        shell: /usr/sbin/nologin
         system: yes
 
-    - name: Download WildFly tarball
+    - name: Download WildFly tarball (from GitHub Releases)
       ansible.builtin.get_url:
-        url: "https://download.jboss.org/wildfly/{{ wildfly_version }}/wildfly-{{ wildfly_version }}.tar.gz"
-        dest: "/tmp/wildfly-{{ wildfly_version }}.tar.gz"
+        url: "{{ wildfly_url }}"
+        dest: "/tmp/{{ wildfly_tarball }}"
         mode: "0644"
+        timeout: 60
 
     - name: Extract WildFly under /opt
       ansible.builtin.unarchive:
-        src: "/tmp/wildfly-{{ wildfly_version }}.tar.gz"
+        src: "/tmp/{{ wildfly_tarball }}"
         dest: "/opt"
         remote_src: yes
         creates: "/opt/wildfly-{{ wildfly_version }}"
@@ -193,8 +199,7 @@
         {{ wildfly_home }}/bin/jboss-cli.sh --connect <<'EOF'
         /subsystem=datasources/jdbc-driver=mariadb:add(driver-name=mariadb, driver-module-name={{ mariadb_module_name }}, driver-xa-datasource-class-name=org.mariadb.jdbc.MariaDbDataSource)
         EOF
-      args:
-        executable: /bin/bash
+      args: { executable: /bin/bash }
       register: add_driver
       changed_when: "'success' in add_driver.stdout or 'already registered' in add_driver.stdout"
       failed_when: false
@@ -278,8 +283,7 @@
         set -e
         cd {{ ejbca_root }}/src
         ant clean deploy
-      args:
-        executable: /bin/bash
+      args: { executable: /bin/bash }
       environment:
         JAVA_HOME: "/usr/lib/jvm/java-17-openjdk-amd64"
         PATH: "/usr/lib/jvm/java-17-openjdk-amd64/bin:{{ ansible_env.PATH }}"
