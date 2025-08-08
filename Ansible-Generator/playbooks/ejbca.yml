@@ -12,7 +12,7 @@
     java_pkg: openjdk-17-jdk
 
     # WildFly from GitHub Releases (pin to an existing tag)
-    wildfly_version: "36.0.1.Final"   # you can bump to 37.0.0.Final if you want
+    wildfly_version: "36.0.1.Final"   # you can bump to "37.0.0.Final"
     wildfly_tarball: "wildfly-{{ wildfly_version }}.tar.gz"
     wildfly_url: "https://github.com/wildfly/wildfly/releases/download/{{ wildfly_version }}/{{ wildfly_tarball }}"
 
@@ -23,10 +23,10 @@
     wildfly_http_port: 8080
     wildfly_https_port: 8443
 
-    # EJBCA source (clone directly so /opt/ejbca/src/conf is guaranteed)
+    # EJBCA source (git → guarantees /opt/ejbca/src/conf exists)
     ejbca_root: "/opt/ejbca"
     ejbca_repo: "https://github.com/Keyfactor/ejbca-ce.git"
-    ejbca_ref: "master"               # pin to a tag/branch as needed, e.g., v8.4.0
+    ejbca_ref: "master"               # optionally pin to a tag like v8.5.0
 
     # MariaDB JDBC driver (WildFly module)
     mariadb_driver_version: "3.4.1"
@@ -36,7 +36,7 @@
     # ===== Database for EJBCA =====
     db_name: "ejbca"
     db_user: "ejbca"
-    db_password: "ChangeMeStrong!"    # use Vault in real setups
+    db_password: "ChangeMeStrong!"    # store in Vault for real use
     db_host: "127.0.0.1"
     db_port: 3306
 
@@ -226,7 +226,7 @@
       changed_when: "'success' in add_ds.stdout or 'already exists' in add_ds.stdout"
       failed_when: false
 
-    # -------------------- EJBCA source (git clone → /opt/ejbca/src) --------------------
+    # -------------------- EJBCA source (git, idempotent) --------------------
     - name: Ensure EJBCA root dir exists
       ansible.builtin.file:
         path: "{{ ejbca_root }}"
@@ -235,14 +235,25 @@
         group: "{{ wildfly_group }}"
         mode: "0755"
 
+    - name: Check if EJBCA src is a git repo
+      ansible.builtin.stat:
+        path: "{{ ejbca_root }}/src/.git"
+      register: ejbca_git
+
+    - name: Remove existing non-git src dir
+      ansible.builtin.file:
+        path: "{{ ejbca_root }}/src"
+        state: absent
+      when: not ejbca_git.stat.exists and
+            (ansible_facts['os_family'] is defined)  # dummy condition to keep block structure
+
     - name: Clone or update EJBCA CE
       ansible.builtin.git:
         repo: "{{ ejbca_repo }}"
         version: "{{ ejbca_ref }}"
         dest: "{{ ejbca_root }}/src"
-        force: yes            # overwrite changes if needed
-        update: yes           # pull latest if repo already exists
-
+        update: yes
+        force: yes
 
     - name: Ensure EJBCA conf directory exists
       ansible.builtin.file:
