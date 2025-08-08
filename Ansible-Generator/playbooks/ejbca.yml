@@ -4,22 +4,24 @@
   become: yes
   gather_facts: yes
 
+  collections:
+    - community.mysql
+
   vars:
-    # ===== Versions & Paths (pin as you like) =====
+    # ===== Versions & Paths =====
     java_pkg: openjdk-17-jdk
-    wildfly_version: "30.0.1.Final"          # adjust/pin to your needs
+    wildfly_version: "30.0.1.Final"          # pin as you like
     wildfly_user: "wildfly"
     wildfly_group: "wildfly"
-    wildfly_home: "/opt/wildfly"             # will be a symlink to /opt/wildfly-<version>
+    wildfly_home: "/opt/wildfly"             # symlink to /opt/wildfly-<version>
     wildfly_bind: "0.0.0.0"                  # listen on all interfaces
     wildfly_http_port: 8080
     wildfly_https_port: 8443
 
-    ejbca_version: "CE-8.0.0"                # tag-like label for your tracking
     ejbca_download_url: "https://github.com/Keyfactor/ejbca-ce/archive/refs/heads/master.zip"
-    ejbca_root: "/opt/ejbca"                 # source/build directory
+    ejbca_root: "/opt/ejbca"
 
-    # MariaDB JDBC (driver module for WildFly)
+    # MariaDB JDBC driver (WildFly module)
     mariadb_driver_version: "3.4.1"
     mariadb_driver_url: "https://repo1.maven.org/maven2/org/mariadb/jdbc/mariadb-java-client/3.4.1/mariadb-java-client-3.4.1.jar"
     mariadb_module_name: "org.mariadb"
@@ -27,7 +29,7 @@
     # ===== Database for EJBCA =====
     db_name: "ejbca"
     db_user: "ejbca"
-    db_password: "ChangeMeStrong!"           # ← change in AWX vault/vars
+    db_password: "ChangeMeStrong!"           # change via AWX/Vault
     db_host: "127.0.0.1"
     db_port: 3306
 
@@ -51,10 +53,9 @@
           - wget
           - ant
           - git
-          - policycoreutils-python-utils
           - python3-pip
           - mariadb-server
-          - python3-pymysql         # for Ansible mysql modules
+          - python3-pymysql     # for community.mysql modules
         state: present
         update_cache: yes
 
@@ -82,12 +83,17 @@
         state: present
 
     # -------------------- WildFly --------------------
-    - name: Create wildfly user and group
+    - name: Create wildfly group
+      ansible.builtin.group:
+        name: "{{ wildfly_group }}"
+        state: present
+
+    - name: Create wildfly user
       ansible.builtin.user:
         name: "{{ wildfly_user }}"
         group: "{{ wildfly_group }}"
         create_home: no
-        shell: /sbin/nologin
+        shell: /usr/sbin/nologin    # Ubuntu path
         system: yes
 
     - name: Download WildFly tarball
@@ -222,7 +228,7 @@
         group: "{{ wildfly_group }}"
         mode: "0755"
 
-    - name: Download EJBCA CE source (master.zip by default)
+    - name: Download EJBCA CE source (master.zip)
       ansible.builtin.get_url:
         url: "{{ ejbca_download_url }}"
         dest: "{{ ejbca_root }}/ejbca-ce.zip"
@@ -235,7 +241,7 @@
         remote_src: yes
         creates: "{{ ejbca_root }}/ejbca-ce-master"
 
-    - name: Symlink to {{ ejbca_root }}/src for convenience
+    - name: Symlink to {{ ejbca_root }}/src
       ansible.builtin.file:
         src: "{{ ejbca_root }}/ejbca-ce-master"
         dest: "{{ ejbca_root }}/src"
@@ -264,7 +270,6 @@
         content: |
           appserver.home={{ wildfly_home }}
           datasource.jndi=java:/EJBCA_DS
-          # RA/CA web contexts (defaults)
           web.pub.http.port={{ wildfly_http_port }}
           web.pub.https.port={{ wildfly_https_port }}
 
@@ -280,7 +285,7 @@
         PATH: "/usr/lib/jvm/java-17-openjdk-amd64/bin:{{ ansible_env.PATH }}"
       notify: Restart WildFly
 
-    # -------------------- Initialize CA (optional but handy for lab) --------------------
+    # -------------------- Initialize CA (lab-friendly) --------------------
     - name: Initialize a Management CA (non-interactive)
       ansible.builtin.shell: |
         set -e
