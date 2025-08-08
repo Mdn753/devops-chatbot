@@ -1,5 +1,5 @@
 ---
-- name: Native install of EJBCA CE on Ubuntu (WildFly + MariaDB)
+- name: Native install of EJBCA CE on Ubuntu (WildFly + MariaDB, archive method)
   hosts: ejbca
   become: yes
   gather_facts: yes
@@ -23,10 +23,11 @@
     wildfly_http_port: 8080
     wildfly_https_port: 8443
 
-    # EJBCA source (git → guarantees /opt/ejbca/src/conf exists)
+    # EJBCA source (archive, no git). Choose branch or tag.
     ejbca_root: "/opt/ejbca"
-    ejbca_repo: "https://github.com/Keyfactor/ejbca-ce.git"
-    ejbca_ref: "master"               # optionally pin to a tag like v8.5.0
+    ejbca_ref: "master"               # or a tag like "v8.5.0"
+    ejbca_archive_url: "https://codeload.github.com/Keyfactor/ejbca-ce/tar.gz/refs/heads/{{ ejbca_ref }}"
+    # If you use a tag, set: ejbca_archive_url: "https://codeload.github.com/Keyfactor/ejbca-ce/tar.gz/refs/tags/{{ ejbca_ref }}"
 
     # MariaDB JDBC driver (WildFly module)
     mariadb_driver_version: "3.4.1"
@@ -36,7 +37,7 @@
     # ===== Database for EJBCA =====
     db_name: "ejbca"
     db_user: "ejbca"
-    db_password: "ChangeMeStrong!"    # store in Vault for real use
+    db_password: "ChangeMeStrong!"    # use Vault in real setups
     db_host: "127.0.0.1"
     db_port: 3306
 
@@ -108,7 +109,7 @@
         url: "{{ wildfly_url }}"
         dest: "/tmp/{{ wildfly_tarball }}"
         mode: "0644"
-        timeout: 60
+        timeout: 120
 
     - name: Extract WildFly under /opt
       ansible.builtin.unarchive:
@@ -226,7 +227,7 @@
       changed_when: "'success' in add_ds.stdout or 'already exists' in add_ds.stdout"
       failed_when: false
 
-    # -------------------- EJBCA source (git, idempotent) --------------------
+    # -------------------- EJBCA source (archive, not git) --------------------
     - name: Ensure EJBCA root dir exists
       ansible.builtin.file:
         path: "{{ ejbca_root }}"
@@ -235,25 +236,33 @@
         group: "{{ wildfly_group }}"
         mode: "0755"
 
-    - name: Check if EJBCA src is a git repo
-      ansible.builtin.stat:
-        path: "{{ ejbca_root }}/src/.git"
-      register: ejbca_git
-
-    - name: Remove existing non-git src dir
+    - name: Clean EJBCA src dir (fresh)
       ansible.builtin.file:
         path: "{{ ejbca_root }}/src"
         state: absent
-      when: not ejbca_git.stat.exists and
-            (ansible_facts['os_family'] is defined)  # dummy condition to keep block structure
 
-    - name: Clone or update EJBCA CE
-      ansible.builtin.git:
-        repo: "{{ ejbca_repo }}"
-        version: "{{ ejbca_ref }}"
+    - name: Recreate EJBCA src dir
+      ansible.builtin.file:
+        path: "{{ ejbca_root }}/src"
+        state: directory
+        owner: "{{ wildfly_user }}"
+        group: "{{ wildfly_group }}"
+        mode: "0755"
+
+    - name: Download EJBCA CE source archive
+      ansible.builtin.get_url:
+        url: "{{ ejbca_archive_url }}"
+        dest: "/tmp/ejbca-ce-{{ ejbca_ref }}.tar.gz"
+        mode: "0644"
+        timeout: 180
+
+    - name: Extract EJBCA CE into src (strip top-level folder)
+      ansible.builtin.unarchive:
+        src: "/tmp/ejbca-ce-{{ ejbca_ref }}.tar.gz"
         dest: "{{ ejbca_root }}/src"
-        update: yes
-        force: yes
+        remote_src: yes
+        extra_opts:
+          - --strip-components=1
 
     - name: Ensure EJBCA conf directory exists
       ansible.builtin.file:
