@@ -11,20 +11,22 @@
     # ===== Versions & Paths =====
     java_pkg: openjdk-17-jdk
 
-    # Use a WildFly version that actually exists on GitHub Releases
-    wildfly_version: "36.0.1.Final"                # you can bump to "37.0.0.Final"
+    # WildFly from GitHub Releases (pin to an existing tag)
+    wildfly_version: "36.0.1.Final"   # you can bump to 37.0.0.Final if you want
     wildfly_tarball: "wildfly-{{ wildfly_version }}.tar.gz"
     wildfly_url: "https://github.com/wildfly/wildfly/releases/download/{{ wildfly_version }}/{{ wildfly_tarball }}"
 
     wildfly_user: "wildfly"
     wildfly_group: "wildfly"
-    wildfly_home: "/opt/wildfly"                   # symlink to /opt/wildfly-<version>
-    wildfly_bind: "0.0.0.0"                        # listen on all interfaces
+    wildfly_home: "/opt/wildfly"      # symlink to /opt/wildfly-<version>
+    wildfly_bind: "0.0.0.0"
     wildfly_http_port: 8080
     wildfly_https_port: 8443
 
-    ejbca_download_url: "https://github.com/Keyfactor/ejbca-ce/archive/refs/heads/master.zip"
+    # EJBCA source (clone directly so /opt/ejbca/src/conf is guaranteed)
     ejbca_root: "/opt/ejbca"
+    ejbca_repo: "https://github.com/Keyfactor/ejbca-ce.git"
+    ejbca_ref: "master"               # pin to a tag/branch as needed, e.g., v8.4.0
 
     # MariaDB JDBC driver (WildFly module)
     mariadb_driver_version: "3.4.1"
@@ -34,7 +36,7 @@
     # ===== Database for EJBCA =====
     db_name: "ejbca"
     db_user: "ejbca"
-    db_password: "ChangeMeStrong!"                 # put in AWX/Vault in real use
+    db_password: "ChangeMeStrong!"    # use Vault in real setups
     db_host: "127.0.0.1"
     db_port: 3306
 
@@ -49,7 +51,7 @@
 
   tasks:
     # -------------------- Base packages --------------------
-    - name: Install base packages (Java, tools, DB server, unzip)
+    - name: Install base packages (Java, tools, DB server)
       ansible.builtin.apt:
         name:
           - "{{ java_pkg }}"
@@ -60,7 +62,7 @@
           - git
           - python3-pip
           - mariadb-server
-          - python3-pymysql          # for community.mysql modules
+          - python3-pymysql    # for community.mysql modules
         state: present
         update_cache: yes
 
@@ -101,7 +103,7 @@
         shell: /usr/sbin/nologin
         system: yes
 
-    - name: Download WildFly tarball (from GitHub Releases)
+    - name: Download WildFly tarball (GitHub Releases)
       ansible.builtin.get_url:
         url: "{{ wildfly_url }}"
         dest: "/tmp/{{ wildfly_tarball }}"
@@ -224,8 +226,8 @@
       changed_when: "'success' in add_ds.stdout or 'already exists' in add_ds.stdout"
       failed_when: false
 
-    # -------------------- Fetch & Build EJBCA CE --------------------
-    - name: Create EJBCA root dir
+    # -------------------- EJBCA source (git clone → /opt/ejbca/src) --------------------
+    - name: Ensure EJBCA root dir exists
       ansible.builtin.file:
         path: "{{ ejbca_root }}"
         state: directory
@@ -233,25 +235,21 @@
         group: "{{ wildfly_group }}"
         mode: "0755"
 
-    - name: Download EJBCA CE source (master.zip)
-      ansible.builtin.get_url:
-        url: "{{ ejbca_download_url }}"
-        dest: "{{ ejbca_root }}/ejbca-ce.zip"
-        mode: "0644"
-
-    - name: Unzip EJBCA CE
-      ansible.builtin.unarchive:
-        src: "{{ ejbca_root }}/ejbca-ce.zip"
-        dest: "{{ ejbca_root }}"
-        remote_src: yes
-        creates: "{{ ejbca_root }}/ejbca-ce-master"
-
-    - name: Symlink to {{ ejbca_root }}/src
-      ansible.builtin.file:
-        src: "{{ ejbca_root }}/ejbca-ce-master"
+    - name: Clone EJBCA CE
+      ansible.builtin.git:
+        repo: "{{ ejbca_repo }}"
+        version: "{{ ejbca_ref }}"
         dest: "{{ ejbca_root }}/src"
-        state: link
-        force: true
+        depth: 1
+        force: yes
+
+    - name: Ensure EJBCA conf directory exists
+      ansible.builtin.file:
+        path: "{{ ejbca_root }}/src/conf"
+        state: directory
+        owner: "{{ wildfly_user }}"
+        group: "{{ wildfly_group }}"
+        mode: "0755"
 
     - name: Write EJBCA database.properties (MariaDB)
       ansible.builtin.copy:
