@@ -235,13 +235,14 @@
         group: "{{ wildfly_group }}"
         mode: "0755"
 
-    - name: Clone EJBCA CE
+    - name: Clone or update EJBCA CE
       ansible.builtin.git:
         repo: "{{ ejbca_repo }}"
         version: "{{ ejbca_ref }}"
         dest: "{{ ejbca_root }}/src"
-        depth: 1
-        force: yes
+        force: yes            # overwrite changes if needed
+        update: yes           # pull latest if repo already exists
+
 
     - name: Ensure EJBCA conf directory exists
       ansible.builtin.file:
