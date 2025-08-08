@@ -26,7 +26,7 @@
 #
 #         return []
 
-import os, requests
+import os, requests, re
 from random import randint
 from rasa_sdk import Action, Tracker
 from rasa_sdk.executor import CollectingDispatcher
@@ -57,8 +57,8 @@ class ActionCreateVM(Action):
 def sanitize(name: str) -> str:
     """Allow letters, numbers, dot, underscore, dash; compress spaces → '-'."""
     name = name.strip()
-    name = requests.sub(r"\s+", "-", name)
-    name = requests.sub(r"[^A-Za-z0-9._-]+", "-", name)
+    name = re.sub(r"\s+", "-", name)
+    name = re.sub(r"[^A-Za-z0-9._-]+", "-", name)
     return name.strip("-")
 
 
