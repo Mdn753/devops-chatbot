@@ -31,6 +31,8 @@ from random import randint
 from rasa_sdk import Action, Tracker
 from rasa_sdk.executor import CollectingDispatcher
 from typing import Any, Dict, List
+from rasa_sdk.events import SlotSet
+
 
 N8N_URL = os.getenv("N8N_WEBHOOK_URL",
                     "http://host.docker.internal:5678/webhook-test/create_vm")
@@ -52,6 +54,14 @@ class ActionCreateVM(Action):
                              f"Launching {vm_name} …"))
         return []
 
+def sanitize(name: str) -> str:
+    """Allow letters, numbers, dot, underscore, dash; compress spaces → '-'."""
+    name = name.strip()
+    name = requests.sub(r"\s+", "-", name)
+    name = requests.sub(r"[^A-Za-z0-9._-]+", "-", name)
+    return name.strip("-")
+
+
 class ActionSetupZabbix(Action):
     def name(self) -> str:
         return "action_setup_zabbix"
@@ -63,31 +73,34 @@ class ActionSetupZabbix(Action):
         domain: Dict[str, Any],
     ) -> List[Dict[str, Any]]:
 
-        # Optional: pass a target (vm/group) if you capture it in a slot
-        target = tracker.get_slot("target") or "all"
+        provided = tracker.get_slot("vm_name")
+        if provided:
+            vm_name = sanitize(provided) or f"zbx-{randint(1000,9999)}"
+            was_auto = False
+        else:
+            vm_name = f"zbx-{randint(1000,9999)}"
+            was_auto = True
 
-        # (Optional) show immediate feedback
-        dispatcher.utter_message("Kicking off Zabbix setup…")
+        dispatcher.utter_message(
+            f"Provisioning VM '{vm_name}' and installing Zabbix…"
+            + (" (auto-generated name)" if was_auto else "")
+        )
 
         try:
-            payload = {"target": target}
-            r = requests.post(N8N_ZABBIX_URL, json=payload, timeout=30)
+            # Keep payload simple; align with what your n8n flow expects
+            payload = {"name": vm_name, "install": "zabbix", "auto": was_auto}
+            r = requests.post(N8N_ZABBIX_URL, json=payload, timeout=45)
 
             if r.ok:
-                # Try to show message from n8n response if it's JSON
-                msg = None
+                # surface message if JSON, else show text
                 try:
                     msg = r.json().get("message")
                 except Exception:
                     msg = r.text[:200] if r.text else None
-
-                dispatcher.utter_message(msg or f"Zabbix setup triggered for '{target}'.")
+                dispatcher.utter_message(msg or f"Workflow triggered for '{vm_name}'.")
             else:
-                dispatcher.utter_message(
-                    f"Failed to trigger workflow ({r.status_code})."
-                )
-
+                dispatcher.utter_message(f"n8n returned {r.status_code}: {r.text[:200]}")
         except Exception as e:
-            dispatcher.utter_message(f"Could not reach the automation: {e}")
+            dispatcher.utter_message(f"Failed to reach n8n: {e}")
 
-        return []
+        return [SlotSet("vm_name", vm_name)]

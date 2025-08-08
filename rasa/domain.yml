@@ -15,6 +15,13 @@ actions:
   - action_create_vm
   - action_setup_zabbix
 
+slots:
+  vm_name:
+    type: text
+    influence_conversation: false
+    mappings:
+      - type: from_entity
+        entity: vm_name
 
 session_config:
   session_expiration_time: 60

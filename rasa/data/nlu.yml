@@ -20,7 +20,12 @@ nlu:
   examples: |
     - set up zabbix
     - install and configure zabbix
-    - provision zabbix on my server
-    - configure monitoring with zabbix
-    - bootstrap zabbix
     - deploy zabbix
+    - set up zabbix on [devops01](vm_name)
+    - setup zabbix named [zbx-lab](vm_name)
+    - create a vm called [monitor-01](vm_name) and install zabbix
+    - bootstrap zabbix on [prod-zbx](vm_name)
+
+regex:
+- name: vm_name
+  pattern: "[A-Za-z0-9._-]+"

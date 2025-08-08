@@ -1,2 +1,8 @@
 .env
 **/__pycache__/
+rasa/.rasa/cache/
+rasa/.rasa/models/
+rasa/actions/__pycache__/
+rasa/actions/__pycache__/actions.cpython-310.pyc
+rasa/models
+rasa/.rasa/cache/cache.db
