@@ -27,7 +27,7 @@
     mgmt_user: "ansible"
     mgmt_password: "ChangeMe!Strong123"
 
-    # EJBCA source (archive, no git). You may pin a release tag (e.g., r9.1.1)
+    # EJBCA source (archive). You may pin a release tag (e.g., r9.1.1)
     ejbca_root: "/opt/ejbca"
     ejbca_ref: "main"
     ejbca_archive_url: "https://codeload.github.com/Keyfactor/ejbca-ce/tar.gz/refs/heads/{{ ejbca_ref }}"
@@ -93,7 +93,7 @@
         priv: "{{ db_name }}.*:ALL"
         state: present
 
-    # -------------------- WildFly --------------------
+    # -------------------- WildFly install/service --------------------
     - name: Create wildfly group
       ansible.builtin.group:
         name: "{{ wildfly_group }}"
@@ -180,7 +180,7 @@
         port: "{{ wildfly_mgmt_port }}"
         timeout: 90
 
-    # -------------------- Force-create management user + role --------------------
+    # -------------------- Management user --------------------
     - name: Stat mgmt user file
       ansible.builtin.stat:
         path: "{{ wildfly_home }}/standalone/configuration/mgmt-users.properties"
@@ -218,7 +218,7 @@
         line: "{{ mgmt_user }}=SuperUser"
         create: yes
 
-    # -------------------- JDBC driver (deploy jar) --------------------
+    # -------------------- JDBC driver --------------------
     - name: Ensure deployments dir exists
       ansible.builtin.file:
         path: "{{ wildfly_home }}/standalone/deployments"
@@ -282,9 +282,9 @@
       args: { executable: /bin/bash }
       register: dstest
       changed_when: false
-      failed_when: dstest.rc != 0 and (dstest.stdout is not search('success'))
+      failed_when: dstest.rc != 0 and ((dstest.stdout | regex_search('success')) is none)
 
-    # -------------------- EJBCA source (archive, not git) --------------------
+    # -------------------- EJBCA source (archive) --------------------
     - name: Ensure EJBCA root dir exists
       ansible.builtin.file:
         path: "{{ ejbca_root }}"
@@ -405,12 +405,13 @@
         --commands="deployment-info"
       args: { executable: /bin/bash }
       register: depinfo
+      changed_when: false
       retries: 20
       delay: 6
       until:
-        - depinfo.stdout is search('ejbca\.ear')
-        - depinfo.stdout is search('ENABLED\s+true')
-        - depinfo.stdout is search('STATUS\s+OK')
+        - (depinfo.stdout | regex_search('ejbca\.ear')) is not none
+        - (depinfo.stdout | regex_search('ENABLED\s+true')) is not none
+        - (depinfo.stdout | regex_search('STATUS\s+OK')) is not none
 
     # -------------------- Optional: datasource health (again) -----------------
     - name: Test EjbcaDS connection (post-deploy)
@@ -422,7 +423,7 @@
       args: { executable: /bin/bash }
       register: dstest2
       changed_when: false
-      failed_when: dstest2.rc != 0 and (dstest2.stdout is not search('success'))
+      failed_when: dstest2.rc != 0 and ((dstest2.stdout | regex_search('success')) is none)
 
     # -------------------- Initialize CA (lab-friendly) --------------------
     - name: Initialize a Management CA (non-interactive)
