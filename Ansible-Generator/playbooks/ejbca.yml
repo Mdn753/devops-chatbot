@@ -23,13 +23,13 @@
     wildfly_https_port: 8443
     wildfly_mgmt_port: 9990
 
-    # Management user for CLI (used by Ansible tasks)
-    mgmt_user: "admin"
+    # Management user for CLI (use a fresh name to avoid collisions)
+    mgmt_user: "ansible"
     mgmt_password: "ChangeMe!Strong123"
 
-    # EJBCA source (archive, no git)
+    # EJBCA source (archive, no git). You can pin a release tag (e.g., r9.1.1)
     ejbca_root: "/opt/ejbca"
-    ejbca_ref: "main"  # optionally pin a stable tag (e.g., r9.1.1)
+    ejbca_ref: "main"
     ejbca_archive_url: "https://codeload.github.com/Keyfactor/ejbca-ce/tar.gz/refs/heads/{{ ejbca_ref }}"
 
     # MariaDB JDBC driver (deploy as a jar, no custom module)
@@ -174,17 +174,51 @@
         state: started
         enabled: yes
 
-    # -------------------- WildFly management user --------------------
-    - name: Ensure WildFly management user exists (idempotent)
-      ansible.builtin.shell: |
-        set -e
-        FILE="{{ wildfly_home }}/standalone/configuration/mgmt-users.properties"
-        if ! test -f "$FILE" || ! grep -q '^{{ mgmt_user }}=' "$FILE"; then
-          {{ wildfly_home }}/bin/add-user.sh -u '{{ mgmt_user }}' -p '{{ mgmt_password }}' -s
-        fi
+    - name: Wait for management port to be up
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: "{{ wildfly_mgmt_port }}"
+        timeout: 60
+
+    # -------------------- Force-create management user + role --------------------
+    - name: Stat mgmt user file
+      ansible.builtin.stat:
+        path: "{{ wildfly_home }}/standalone/configuration/mgmt-users.properties"
+      register: mgmt_users_file
+
+    - name: Remove any existing mgmt user line (prevent collisions)
+      ansible.builtin.lineinfile:
+        path: "{{ wildfly_home }}/standalone/configuration/mgmt-users.properties"
+        regexp: "^{{ mgmt_user }}="
+        state: absent
+        create: yes
+      when: mgmt_users_file.stat.exists
+
+    - name: Stat mgmt groups file
+      ansible.builtin.stat:
+        path: "{{ wildfly_home }}/standalone/configuration/mgmt-groups.properties"
+      register: mgmt_groups_file
+
+    - name: Remove any existing mgmt group mapping for user
+      ansible.builtin.lineinfile:
+        path: "{{ wildfly_home }}/standalone/configuration/mgmt-groups.properties"
+        regexp: "^{{ mgmt_user }}="
+        state: absent
+        create: yes
+      when: mgmt_groups_file.stat.exists
+
+    - name: Create WildFly management user (silent)
+      ansible.builtin.shell: >
+        {{ wildfly_home }}/bin/add-user.sh -u '{{ mgmt_user }}' -p '{{ mgmt_password }}' -s
       args: { executable: /bin/bash }
       register: add_mgmt_user
       changed_when: add_mgmt_user.rc == 0
+
+    - name: Ensure management user has SuperUser role
+      ansible.builtin.lineinfile:
+        path: "{{ wildfly_home }}/standalone/configuration/mgmt-groups.properties"
+        line: "{{ mgmt_user }}=SuperUser"
+        create: yes
 
     # -------------------- JDBC driver (deploy jar) --------------------
     - name: Ensure deployments dir exists
