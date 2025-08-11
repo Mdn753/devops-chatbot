@@ -23,11 +23,11 @@
     wildfly_https_port: 8443
     wildfly_mgmt_port: 9990
 
-    # Management user for CLI (use a fresh name to avoid collisions)
+    # Management user for CLI (dedicated to avoid collisions)
     mgmt_user: "ansible"
     mgmt_password: "ChangeMe!Strong123"
 
-    # EJBCA source (archive, no git). You can pin a release tag (e.g., r9.1.1)
+    # EJBCA source (archive, no git). You may pin a release tag (e.g., r9.1.1)
     ejbca_root: "/opt/ejbca"
     ejbca_ref: "main"
     ejbca_archive_url: "https://codeload.github.com/Keyfactor/ejbca-ce/tar.gz/refs/heads/{{ ejbca_ref }}"
@@ -178,7 +178,7 @@
       ansible.builtin.wait_for:
         host: 127.0.0.1
         port: "{{ wildfly_mgmt_port }}"
-        timeout: 60
+        timeout: 90
 
     # -------------------- Force-create management user + role --------------------
     - name: Stat mgmt user file
@@ -211,8 +211,6 @@
       ansible.builtin.shell: >
         {{ wildfly_home }}/bin/add-user.sh -u '{{ mgmt_user }}' -p '{{ mgmt_password }}' -s
       args: { executable: /bin/bash }
-      register: add_mgmt_user
-      changed_when: add_mgmt_user.rc == 0
 
     - name: Ensure management user has SuperUser role
       ansible.builtin.lineinfile:
@@ -373,7 +371,18 @@
       args: { executable: /bin/bash }
       register: deploy_cli
 
-    - name: Wait until WildFly reports ejbca.ear OK
+    - name: Enable ejbca.ear deployment
+      ansible.builtin.shell: >
+        {{ wildfly_home }}/bin/jboss-cli.sh -c
+        --controller=127.0.0.1:{{ wildfly_mgmt_port }}
+        --user='{{ mgmt_user }}' --password='{{ mgmt_password }}'
+        --commands="deployment enable ejbca.ear"
+      args: { executable: /bin/bash }
+      register: enable_out
+      changed_when: true
+      failed_when: false
+
+    - name: Wait until ejbca.ear is ENABLED and OK
       ansible.builtin.shell: >
         {{ wildfly_home }}/bin/jboss-cli.sh -c
         --controller=127.0.0.1:{{ wildfly_mgmt_port }}
@@ -381,9 +390,23 @@
         --commands="deployment-info"
       args: { executable: /bin/bash }
       register: depinfo
-      retries: 15
+      retries: 20
       delay: 6
-      until: depinfo.stdout is search("ejbca\\.ear\\s+OK")
+      until:
+        - depinfo.stdout is search('ejbca\.ear')
+        - depinfo.stdout is search('ENABLED\s+true')
+        - depinfo.stdout is search('STATUS\s+OK')
+
+    - name: Test EjbcaDS connection
+      ansible.builtin.shell: >
+        {{ wildfly_home }}/bin/jboss-cli.sh -c
+        --controller=127.0.0.1:{{ wildfly_mgmt_port }}
+        --user='{{ mgmt_user }}' --password='{{ mgmt_password }}'
+        --commands="/subsystem=datasources/data-source=ejbcads:test-connection-in-pool"
+      args: { executable: /bin/bash }
+      register: dstest
+      changed_when: false
+      failed_when: dstest.rc != 0 and (dstest.stdout is not search('success'))
 
     # -------------------- Initialize CA (lab-friendly) --------------------
     - name: Initialize a Management CA (non-interactive)
