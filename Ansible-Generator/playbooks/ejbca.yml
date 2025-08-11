@@ -27,7 +27,7 @@
     mgmt_user: "ansible"
     mgmt_password: "ChangeMe!Strong123"
 
-    # EJBCA source (archive, no git). You may pin a release tag (e.g., r9.1.1)
+    # EJBCA source (archive, no git). Pin a release if you want (e.g., r9.1.1)
     ejbca_root: "/opt/ejbca"
     ejbca_ref: "main"
     ejbca_archive_url: "https://codeload.github.com/Keyfactor/ejbca-ce/tar.gz/refs/heads/{{ ejbca_ref }}"
@@ -351,36 +351,25 @@
         msg: "ejbca.ear not found at {{ ejbca_root }}/src/dist/ejbca.ear"
       when: not ejbca_ear.stat.exists
 
-    # -------------------- Deploy via WildFly CLI --------------------
-    - name: Undeploy old ejbca.ear if present (ignore errors)
+    # -------------------- Clean & Deploy via WildFly CLI --------------------
+    - name: Remove disabled persistent deployment if present
       ansible.builtin.shell: >
         {{ wildfly_home }}/bin/jboss-cli.sh -c
         --controller=127.0.0.1:{{ wildfly_mgmt_port }}
         --user='{{ mgmt_user }}' --password='{{ mgmt_password }}'
-        --commands="undeploy ejbca.ear --keep-content=true"
+        --commands="/deployment=ejbca.ear:remove"
       args: { executable: /bin/bash }
       failed_when: false
       changed_when: false
 
-    - name: Deploy new ejbca.ear via CLI
+    - name: Deploy fresh (enabled) with explicit names
       ansible.builtin.shell: >
         {{ wildfly_home }}/bin/jboss-cli.sh -c
         --controller=127.0.0.1:{{ wildfly_mgmt_port }}
         --user='{{ mgmt_user }}' --password='{{ mgmt_password }}'
-        --commands="deploy {{ ejbca_root }}/src/dist/ejbca.ear --force"
+        --commands="deploy {{ ejbca_root }}/src/dist/ejbca.ear --name=ejbca.ear --runtime-name=ejbca.ear"
       args: { executable: /bin/bash }
       register: deploy_cli
-
-    - name: Enable ejbca.ear deployment
-      ansible.builtin.shell: >
-        {{ wildfly_home }}/bin/jboss-cli.sh -c
-        --controller=127.0.0.1:{{ wildfly_mgmt_port }}
-        --user='{{ mgmt_user }}' --password='{{ mgmt_password }}'
-        --commands="deployment enable ejbca.ear"
-      args: { executable: /bin/bash }
-      register: enable_out
-      changed_when: true
-      failed_when: false
 
     - name: Wait until ejbca.ear is ENABLED and OK
       ansible.builtin.shell: >
