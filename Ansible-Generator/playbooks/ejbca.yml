@@ -398,20 +398,22 @@
       args: { executable: /bin/bash }
 
     - name: Wait until ejbca.ear is ENABLED and OK
-      ansible.builtin.shell: >
-        {{ wildfly_home }}/bin/jboss-cli.sh -c
-        --controller=127.0.0.1:{{ wildfly_mgmt_port }}
-        --user='{{ mgmt_user }}' --password='{{ mgmt_password }}'
-        --commands="deployment-info"
+      ansible.builtin.shell: |
+        set -e
+        OUT="$({{ wildfly_home }}/bin/jboss-cli.sh -c \
+          --controller=127.0.0.1:{{ wildfly_mgmt_port }} \
+          --user='{{ mgmt_user }}' --password='{{ mgmt_password }}' \
+          --commands='deployment-info')"
+        echo "$OUT"
+        # Expect a row like: "ejbca.ear  ejbca.ear  true  true  OK"
+        echo "$OUT" | awk '$1=="ejbca.ear" && $4=="true" && $5=="OK"{f=1} END{exit(f?0:1)}'
       args: { executable: /bin/bash }
       register: depinfo
       changed_when: false
       retries: 20
       delay: 6
-      until:
-        - (depinfo.stdout | regex_search('ejbca\.ear')) is not none
-        - (depinfo.stdout | regex_search('ENABLED\s+true')) is not none
-        - (depinfo.stdout | regex_search('STATUS\s+OK')) is not none
+      until: depinfo.rc == 0
+
 
     # -------------------- Optional: datasource health (again) -----------------
     - name: Test EjbcaDS connection (post-deploy)
