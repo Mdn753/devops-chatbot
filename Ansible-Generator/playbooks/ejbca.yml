@@ -1,5 +1,5 @@
 ---
-- name: Native install of EJBCA CE on Ubuntu (WildFly 36 + MariaDB, CLI deploy)
+- name: Native install of EJBCA CE on Ubuntu (WildFly 36 + MariaDB, robust CLI deploy)
   hosts: ejbca
   become: yes
   gather_facts: yes
@@ -23,16 +23,16 @@
     wildfly_https_port: 8443
     wildfly_mgmt_port: 9990
 
-    # Management user for CLI (dedicated to avoid collisions)
+    # Management user for CLI
     mgmt_user: "ansible"
     mgmt_password: "ChangeMe!Strong123"
 
-    # EJBCA source (archive, no git). Pin a release if you want (e.g., r9.1.1)
+    # EJBCA source (archive, no git). You may pin a release tag (e.g., r9.1.1)
     ejbca_root: "/opt/ejbca"
     ejbca_ref: "main"
     ejbca_archive_url: "https://codeload.github.com/Keyfactor/ejbca-ce/tar.gz/refs/heads/{{ ejbca_ref }}"
 
-    # MariaDB JDBC driver (deploy as a jar, no custom module)
+    # MariaDB JDBC driver (deploy as a JAR; driver-name equals JAR name)
     mariadb_driver_version: "3.4.1"
     mariadb_driver_url: "https://repo1.maven.org/maven2/org/mariadb/jdbc/mariadb-java-client/{{ mariadb_driver_version }}/mariadb-java-client-{{ mariadb_driver_version }}.jar"
     mariadb_driver_jar: "mariadb-java-client-{{ mariadb_driver_version }}.jar"
@@ -233,29 +233,56 @@
         dest: "{{ wildfly_home }}/standalone/deployments/{{ mariadb_driver_jar }}"
         mode: "0644"
 
-    # -------------------- Datasource --------------------
-    - name: Create EJBCA datasource (cli)
+    # -------------------- Datasource (remove → add → enable → test) ------------
+    - name: Remove old EjbcaDS if present (ignore if missing)
       ansible.builtin.shell: >
         {{ wildfly_home }}/bin/jboss-cli.sh -c
         --controller=127.0.0.1:{{ wildfly_mgmt_port }}
         --user='{{ mgmt_user }}' --password='{{ mgmt_password }}'
-        --commands="if (outcome != success) of /subsystem=datasources/data-source=ejbcads:read-resource
-          data-source add
-            --name=ejbcads
-            --jndi-name=java:/EjbcaDS
-            --connection-url=jdbc:mariadb://{{ db_host }}:{{ db_port }}/{{ db_name }}
-            --driver-name={{ mariadb_driver_jar }}
-            --driver-class=org.mariadb.jdbc.Driver
-            --user-name={{ db_user }}
-            --password={{ db_password }}
-            --min-pool-size=5 --max-pool-size=150
-            --validate-on-match=true --background-validation=false
-            --check-valid-connection-sql=select\ 1;
-        end-if"
+        --commands="/subsystem=datasources/data-source=ejbcads:remove"
       args: { executable: /bin/bash }
-      register: add_ds
-      changed_when: "'success' in add_ds.stdout or 'WFLYCTL0212' in add_ds.stdout"
       failed_when: false
+      changed_when: false
+
+    - name: Add EjbcaDS
+      ansible.builtin.shell: >
+        {{ wildfly_home }}/bin/jboss-cli.sh -c
+        --controller=127.0.0.1:{{ wildfly_mgmt_port }}
+        --user='{{ mgmt_user }}' --password='{{ mgmt_password }}'
+        --commands="data-source add
+          --name=ejbcads
+          --jndi-name=java:/EjbcaDS
+          --connection-url=jdbc:mariadb://{{ db_host }}:{{ db_port }}/{{ db_name }}
+          --driver-name={{ mariadb_driver_jar }}
+          --driver-class=org.mariadb.jdbc.Driver
+          --user-name={{ db_user }}
+          --password={{ db_password }}
+          --min-pool-size=5 --max-pool-size=150
+          --validate-on-match=true
+          --background-validation=false
+          --check-valid-connection-sql='select 1;'"
+      args: { executable: /bin/bash }
+
+    - name: Enable EjbcaDS
+      ansible.builtin.shell: >
+        {{ wildfly_home }}/bin/jboss-cli.sh -c
+        --controller=127.0.0.1:{{ wildfly_mgmt_port }}
+        --user='{{ mgmt_user }}' --password='{{ mgmt_password }}'
+        --commands="/subsystem=datasources/data-source=ejbcads:enable"
+      args: { executable: /bin/bash }
+      register: ds_enable
+      failed_when: false
+
+    - name: Test EjbcaDS connection
+      ansible.builtin.shell: >
+        {{ wildfly_home }}/bin/jboss-cli.sh -c
+        --controller=127.0.0.1:{{ wildfly_mgmt_port }}
+        --user='{{ mgmt_user }}' --password='{{ mgmt_password }}'
+        --commands="/subsystem=datasources/data-source=ejbcads:test-connection-in-pool"
+      args: { executable: /bin/bash }
+      register: dstest
+      changed_when: false
+      failed_when: dstest.rc != 0 and (dstest.stdout is not search('success'))
 
     # -------------------- EJBCA source (archive, not git) --------------------
     - name: Ensure EJBCA root dir exists
@@ -352,7 +379,7 @@
       when: not ejbca_ear.stat.exists
 
     # -------------------- Clean & Deploy via WildFly CLI --------------------
-    - name: Remove disabled persistent deployment if present
+    - name: Ensure no stale ejbca.ear deployment remains
       ansible.builtin.shell: >
         {{ wildfly_home }}/bin/jboss-cli.sh -c
         --controller=127.0.0.1:{{ wildfly_mgmt_port }}
@@ -369,7 +396,6 @@
         --user='{{ mgmt_user }}' --password='{{ mgmt_password }}'
         --commands="deploy {{ ejbca_root }}/src/dist/ejbca.ear --name=ejbca.ear --runtime-name=ejbca.ear"
       args: { executable: /bin/bash }
-      register: deploy_cli
 
     - name: Wait until ejbca.ear is ENABLED and OK
       ansible.builtin.shell: >
@@ -386,16 +412,17 @@
         - depinfo.stdout is search('ENABLED\s+true')
         - depinfo.stdout is search('STATUS\s+OK')
 
-    - name: Test EjbcaDS connection
+    # -------------------- Optional: datasource health (again) -----------------
+    - name: Test EjbcaDS connection (post-deploy)
       ansible.builtin.shell: >
         {{ wildfly_home }}/bin/jboss-cli.sh -c
         --controller=127.0.0.1:{{ wildfly_mgmt_port }}
         --user='{{ mgmt_user }}' --password='{{ mgmt_password }}'
         --commands="/subsystem=datasources/data-source=ejbcads:test-connection-in-pool"
       args: { executable: /bin/bash }
-      register: dstest
+      register: dstest2
       changed_when: false
-      failed_when: dstest.rc != 0 and (dstest.stdout is not search('success'))
+      failed_when: dstest2.rc != 0 and (dstest2.stdout is not search('success'))
 
     # -------------------- Initialize CA (lab-friendly) --------------------
     - name: Initialize a Management CA (non-interactive)
