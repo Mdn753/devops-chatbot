@@ -1,0 +1,127 @@
+---
+- name: Deploy Python app on Raspberry Pi
+  hosts: all
+  become: true
+  gather_facts: true
+
+  vars:
+    # ---- Fill/override via AWX Survey or extra_vars on launch ----
+    app_name: "myapp"                                  # service name
+    app_repo: "https://github.com/you/your-app.git"    # Git repo (HTTP or SSH)
+    app_branch: "main"                                 # branch/tag/commit
+    app_entrypoint: "app.py"                           # script relative to repo root
+    app_user: "myapp"                                  # system user to run the app
+    app_dir: "/opt/{{ app_name }}"                     # code + venv live here
+    venv_dir: "{{ app_dir }}/venv"
+    env_file: "/etc/{{ app_name }}/.env"
+    expose_port: 0                                     # e.g. 8000 (0 = skip UFW rule)
+    # env_vars is a dict written to .env as KEY=VALUE
+    env_vars: {}                                       # e.g. {"ENV":"prod","PORT":"8000"}
+
+  pre_tasks:
+    - name: Install base packages (Debian/Raspbian)
+      ansible.builtin.apt:
+        name:
+          - git
+          - python3
+          - python3-venv
+          - python3-pip
+          - ufw
+        state: present
+        update_cache: yes
+
+    - name: Create app user
+      ansible.builtin.user:
+        name: "{{ app_user }}"
+        system: true
+        create_home: false
+        shell: /usr/sbin/nologin
+
+    - name: Create directories
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: directory
+        owner: "{{ item.owner | default(app_user) }}"
+        group: "{{ item.group | default(app_user) }}"
+        mode: "{{ item.mode | default('0755') }}"
+      loop:
+        - { path: "{{ app_dir }}" }
+        - { path: "/etc/{{ app_name }}", owner: "root", group: "root", mode: "0750" }
+        - { path: "/var/log/{{ app_name }}" }
+
+  tasks:
+    - name: Checkout/Update code
+      ansible.builtin.git:
+        repo: "{{ app_repo }}"
+        dest: "{{ app_dir }}/src"
+        version: "{{ app_branch }}"
+        force: true
+        update: true
+      register: git_result
+
+    - name: Ensure venv exists and install requirements (if any)
+      ansible.builtin.pip:
+        requirements: "{{ app_dir }}/src/requirements.txt"
+        virtualenv: "{{ venv_dir }}"
+        virtualenv_command: "python3 -m venv"
+      register: pip_result
+      failed_when: false   # allow success if no requirements.txt
+
+    - name: Create .env from env_vars
+      ansible.builtin.copy:
+        dest: "{{ env_file }}"
+        owner: root
+        group: root
+        mode: "0640"
+        content: |
+          {% for k, v in env_vars.items() %}
+          {{ k }}={{ v }}
+          {% endfor %}
+
+    - name: Write systemd unit
+      ansible.builtin.copy:
+        dest: "/etc/systemd/system/{{ app_name }}.service"
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Unit]
+          Description={{ app_name }} service
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=simple
+          User={{ app_user }}
+          Group={{ app_user }}
+          WorkingDirectory={{ app_dir }}/src
+          EnvironmentFile=-{{ env_file }}
+          ExecStart={{ venv_dir }}/bin/python {{ app_entrypoint }}
+          Restart=on-failure
+          RestartSec=3
+          StandardOutput=append:/var/log/{{ app_name }}/stdout.log
+          StandardError=append:/var/log/{{ app_name }}/stderr.log
+
+          [Install]
+          WantedBy=multi-user.target
+      notify:
+        - daemon-reload
+        - restart app
+
+    - name: Optionally open UFW port
+      ansible.builtin.ufw:
+        rule: allow
+        port: "{{ expose_port }}"
+        proto: tcp
+      when: expose_port | int > 0
+
+  handlers:
+    - name: daemon-reload
+      ansible.builtin.systemd:
+        daemon_reload: true
+
+    - name: restart app
+      ansible.builtin.systemd:
+        name: "{{ app_name }}"
+        state: restarted
+        enabled: true

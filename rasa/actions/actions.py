@@ -89,7 +89,7 @@ class ActionSetupZabbix(Action):
         try:
             # Keep payload simple; align with what your n8n flow expects
             payload = {"name": vm_name, "install": "zabbix", "auto": was_auto}
-            r = requests.post(N8N_ZABBIX_URL, json=payload, timeout=45)
+            r = requests.post(N8N_ZABBIX_URL, json=payload, timeout=9000000)
 
             if r.ok:
                 # surface message if JSON, else show text
