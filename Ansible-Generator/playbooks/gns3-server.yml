@@ -9,7 +9,7 @@
     gns3_port:  3080
     gns3_user:  gns3
     gns3_version: "2.2.54"
-    build_image: "ubuntu:22.04"         # clean builders; stable toolchains
+    build_image: "ubuntu:22.04"
 
   tasks:
     ####################################################################
@@ -38,7 +38,8 @@
           - build-essential
           - python3
           - python3-pip
-          - acl                     # for setcap if needed
+          - libcap2-bin             # provides setcap
+          - ca-certificates
         state: present
 
     ####################################################################
@@ -47,10 +48,12 @@
     - name: Ensure pip works
       command: python3 -m pip --version
 
-    - name: Install/upgrade virtualenv via pip (system-wide)
+    - name: Install/upgrade virtualenv via pip (allow system pip per PEP 668)
       command: python3 -m pip install --upgrade virtualenv
+      environment:
+        PIP_BREAK_SYSTEM_PACKAGES: "1"
 
-    - name: Create Python virtualenv for GNS3
+    - name: Create Python virtualenv for GNS3 (via virtualenv, not python3-venv)
       command: python3 -m virtualenv /opt/gns3/venv
       args:
         creates: /opt/gns3/venv/bin/python
@@ -66,8 +69,7 @@
     ####################################################################
     - name: Install Docker engine on host
       apt:
-        name:
-          - docker.io
+        name: docker.io
         state: present
 
     - name: Ensure Docker service is running
