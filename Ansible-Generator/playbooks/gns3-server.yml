@@ -94,28 +94,32 @@
         docker run --rm
         -v /opt/gns3/build-out:/out
         {{ build_image }} bash -lc '
-          set -euo pipefail
-          export DEBIAN_FRONTEND=noninteractive
-          apt-get update
+          set -euo pipefail;
+          export DEBIAN_FRONTEND=noninteractive;
+          apt-get update &&
           apt-get install -y --no-install-recommends
             git build-essential cmake make gcc g++ autoconf automake libtool
-            libpcap-dev libelf-dev ca-certificates pkg-config
+            libpcap-dev libelf-dev ca-certificates pkg-config &&
           # uBridge
-          cd /tmp && git clone https://github.com/GNS3/ubridge.git
-          cd /tmp/ubridge && make clean || true && make
-          install -m 0755 ubridge /out/ubridge
+          cd /tmp &&
+          git clone https://github.com/GNS3/ubridge.git &&
+          cd /tmp/ubridge && make clean || true && make &&
+          install -m 0755 ubridge /out/ubridge &&
           # Dynamips
-          cd /tmp && git clone https://github.com/GNS3/dynamips.git
-          cd /tmp/dynamips && mkdir -p build && cd build && cmake .. && make
-          install -m 0755 dynamips /out/dynamips
+          cd /tmp &&
+          git clone https://github.com/GNS3/dynamips.git &&
+          cd /tmp/dynamips && mkdir -p build && cd build &&
+          cmake .. && make &&
+          install -m 0755 dynamips /out/dynamips &&
           # VPCS
-          cd /tmp && git clone https://github.com/GNS3/vpcs.git
-          cd /tmp/vpcs
+          cd /tmp &&
+          git clone https://github.com/GNS3/vpcs.git &&
+          cd /tmp/vpcs &&
           if [ -f configure ]; then ./configure && make; \
           elif [ -f autogen.sh ]; then ./autogen.sh && ./configure && make; \
-          else cd src && make -f Makefile.linux; cd ..; fi
+          else cd src && make -f Makefile.linux && cd ..; fi &&
           if [ -f vpcs ]; then install -m 0755 vpcs /out/vpcs; \
-          elif [ -f src/vpcs ]; then install -m 0755 src/vpcs /out/vpcs; fi
+          else install -m 0755 src/vpcs /out/vpcs; fi
         '
 
     - name: Install built binaries to host
