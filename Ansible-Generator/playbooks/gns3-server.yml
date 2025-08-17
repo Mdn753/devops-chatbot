@@ -1,5 +1,5 @@
 ---
-- name: Install and configure a standalone GNS3-server (venv-based)
+- name: Install and configure a standalone GNS3-server (venv-based, no python3-venv)
   hosts: gns3-servers
   become: yes
   gather_facts: yes
@@ -25,7 +25,7 @@
         update_cache: yes
         cache_valid_time: 3600
 
-    - name: Install base packages (no libvirt, no py runtime pins)
+    - name: Install base packages (no libvirt, avoid python3-venv)
       apt:
         name:
           - wget
@@ -36,7 +36,7 @@
           - git
           - build-essential
           - python3
-          - python3-venv            # we’ll use venv to isolate Python deps
+          - python3-pip               # use pip to create virtualenv
         state: present
 
     - name: Install build deps for uBridge/Dynamips/VPCS
@@ -54,7 +54,27 @@
         state: present
 
     ####################################################################
-    # 1) USER & DIRECTORIES
+    # 1) PYTHON VENV + GNS3 SERVER IN VENV (no apt python3-venv)
+    ####################################################################
+    - name: Ensure pip works
+      command: python3 -m pip --version
+
+    - name: Install/upgrade virtualenv via pip (system-wide)
+      command: python3 -m pip install --upgrade virtualenv
+
+    - name: Create Python virtualenv for GNS3
+      command: python3 -m virtualenv /opt/gns3/venv
+      args:
+        creates: /opt/gns3/venv/bin/python
+
+    - name: Upgrade pip/setuptools/wheel inside venv
+      command: /opt/gns3/venv/bin/pip install --upgrade pip setuptools wheel
+
+    - name: Install gns3-server in venv (pinned)
+      command: /opt/gns3/venv/bin/pip install gns3-server=={{ gns3_version }}
+
+    ####################################################################
+    # 2) USER, DIRECTORIES, ANCILLARY TOOLS
     ####################################################################
     - name: Create service user
       user:
@@ -63,7 +83,7 @@
         create_home: yes
         home: /opt/gns3
         shell: /usr/sbin/nologin
-        groups: kvm                 # no libvirt on purpose
+        groups: kvm
 
     - name: Create GNS3 directories
       file:
@@ -79,23 +99,6 @@
         - /opt/gns3/projects
         - /var/log/gns3
 
-    ####################################################################
-    # 2) PYTHON VENV + GNS3 SERVER IN VENV
-    ####################################################################
-    - name: Create Python virtualenv for GNS3
-      command: python3 -m venv /opt/gns3/venv
-      args:
-        creates: /opt/gns3/venv/bin/python
-
-    - name: Upgrade pip/setuptools/wheel inside venv
-      command: /opt/gns3/venv/bin/pip install --upgrade pip setuptools wheel
-
-    - name: Install gns3-server in venv (pinned)
-      command: /opt/gns3/venv/bin/pip install gns3-server=={{ gns3_version }}
-
-    ####################################################################
-    # 3) ANCILLARY TOOLS (uBridge / Dynamips / VPCS)
-    ####################################################################
     - name: Build uBridge from source
       shell: |
         cd /tmp
@@ -144,7 +147,7 @@
       ignore_errors: yes
 
     ####################################################################
-    # 4) CONFIGURATION
+    # 3) CONFIGURATION
     ####################################################################
     - name: Deploy gns3_server.conf
       copy:
@@ -169,7 +172,7 @@
       notify: restart gns3
 
     ####################################################################
-    # 5) SYSTEMD SERVICE (runs venv binary)
+    # 4) SYSTEMD SERVICE (runs venv binary)
     ####################################################################
     - name: Ensure gns3server binary exists in venv
       stat:
@@ -215,7 +218,7 @@
         daemon_reload: yes
 
     ####################################################################
-    # 6) FIREWALL
+    # 5) FIREWALL
     ####################################################################
     - name: Check if UFW is active
       shell: "ufw status | grep -q 'Status: active'"
@@ -234,7 +237,7 @@
       when: ufw_active.rc == 0
 
     ####################################################################
-    # 7) VERIFY SERVER IS RESPONDING
+    # 6) VERIFY SERVER IS RESPONDING
     ####################################################################
     - name: Wait until the API responds
       uri:
