@@ -26,6 +26,17 @@ nlu:
     - create a vm called [monitor-01](vm_name) and install zabbix
     - bootstrap zabbix on [prod-zbx](vm_name)
 
+
+- intent: setup_GNS3
+  examples: |
+    - set up GNS3
+    - install and configure GNS3
+    - deploy GNS3
+    - set up GNS3 on [devops01](vm_name)
+    - setup GNS3 named [zbx-lab](vm_name)
+    - create a vm called [monitor-01](vm_name) and install GNS3
+    - bootstrap GNS3 on [prod-zbx](vm_name)
+
 regex:
 - name: vm_name
   pattern: "[A-Za-z0-9._-]+"

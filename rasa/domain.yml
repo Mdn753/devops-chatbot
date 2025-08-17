@@ -4,6 +4,7 @@ intents:
   - greet
   - create_vm
   - setup_zabbix
+  - setup_GNS3
 
 responses:
   utter_greet:
@@ -14,6 +15,7 @@ responses:
 actions:
   - action_create_vm
   - action_setup_zabbix
+  - action_setup_GNS3
 
 slots:
   vm_name:

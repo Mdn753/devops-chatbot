@@ -9,3 +9,7 @@ rules:
   steps:
     - intent: setup_zabbix
     - action: action_setup_zabbix
+- rule: setup GNS3
+  steps:
+    - intent: setup_GNS3  
+    - action: action_setup_GNS3

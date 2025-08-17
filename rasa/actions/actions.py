@@ -104,3 +104,48 @@ class ActionSetupZabbix(Action):
             dispatcher.utter_message(f"Failed to reach n8n: {e}")
 
         return [SlotSet("vm_name", vm_name)]
+    
+class ActionSetupGNS3(Action):
+    def name(self) -> str:
+        return "action_setup_GNS3"
+
+    async def run(
+        self,
+        dispatcher: CollectingDispatcher,
+        tracker: Tracker,
+        domain: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        
+        provided = tracker.get_slot("vm_name")
+        if provided:
+            vm_name = sanitize(provided) or f"gns3-{randint(1000,9999)}"
+            was_auto = False
+        else:
+            vm_name = f"gns3-{randint(1000,9999)}"
+            was_auto = True
+
+        dispatcher.utter_message(
+            f"Provisioning VM '{vm_name}' and installing GNS3…"
+            + (" (auto-generated name)" if was_auto else "")
+        )
+
+        try:
+            payload = {"name": vm_name, "install": "gns3", "auto": was_auto}
+            r = requests.post(
+                "http://host.docker.internal:5678/webhook-test/gns3_setup",
+                json=payload,
+                timeout=9000000
+            )
+
+            if r.ok:
+                try:
+                    msg = r.json().get("message")
+                except Exception:
+                    msg = r.text[:200] if r.text else None
+                dispatcher.utter_message(msg or f"Workflow triggered for '{vm_name}'.")
+            else:
+                dispatcher.utter_message(f"n8n returned {r.status_code}: {r.text[:200]}")
+        except Exception as e:
+            dispatcher.utter_message(f"Failed to reach n8n: {e}")
+
+        return [SlotSet("vm_name", vm_name)]
