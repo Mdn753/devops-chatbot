@@ -5,11 +5,11 @@
   gather_facts: yes
 
   vars:
-    gns3_host:  "0.0.0.0"
-    gns3_port:  3080
-    gns3_user:  gns3
+    gns3_host: "0.0.0.0"
+    gns3_port: 3080
+    gns3_user: gns3
     gns3_version: "2.2.54"
-    build_image: "ubuntu:22.04"
+    build_image: "buildpack-deps:jammy"   # has git/gcc/make preinstalled
 
   tasks:
     ####################################################################
@@ -38,7 +38,7 @@
           - build-essential
           - python3
           - python3-pip
-          - libcap2-bin             # provides setcap
+          - libcap2-bin          # provides setcap
           - ca-certificates
         state: present
 
@@ -53,7 +53,7 @@
       environment:
         PIP_BREAK_SYSTEM_PACKAGES: "1"
 
-    - name: Create Python virtualenv for GNS3 (via virtualenv, not python3-venv)
+    - name: Create Python virtualenv for GNS3 (via virtualenv)
       command: python3 -m virtualenv /opt/gns3/venv
       args:
         creates: /opt/gns3/venv/bin/python
@@ -94,28 +94,31 @@
         docker run --rm
         -v /opt/gns3/build-out:/out
         {{ build_image }} bash -lc '
-          set -euo pipefail;
+          set -euxo pipefail;
           export DEBIAN_FRONTEND=noninteractive;
+          # sanity: confirm git and gcc already exist in image
+          command -v git; command -v gcc;
+          # only the missing libs/tools
           apt-get update;
-          apt-get install -y --no-install-recommends git build-essential cmake make gcc g++ autoconf automake libtool libpcap-dev libelf-dev ca-certificates pkg-config;
+          apt-get install -y --no-install-recommends
+            cmake autoconf automake libtool libpcap-dev libelf-dev pkg-config ca-certificates;
           # uBridge
           cd /tmp && git clone https://github.com/GNS3/ubridge.git;
-          cd /tmp/ubridge && (make clean || true) && make;
+          cd /tmp/ubridge && (make clean || true) && make -j"$(nproc)";
           install -m 0755 ubridge /out/ubridge;
           # Dynamips
           cd /tmp && git clone https://github.com/GNS3/dynamips.git;
-          cd /tmp/dynamips && mkdir -p build && cd build && cmake .. && make;
+          cd /tmp/dynamips && mkdir -p build && cd build && cmake .. && make -j"$(nproc)";
           install -m 0755 dynamips /out/dynamips;
           # VPCS
           cd /tmp && git clone https://github.com/GNS3/vpcs.git;
           cd /tmp/vpcs;
-          if [ -f configure ]; then ./configure && make; \
-          elif [ -f autogen.sh ]; then ./autogen.sh && ./configure && make; \
-          else cd src && make -f Makefile.linux && cd ..; fi;
+          if [ -f configure ]; then ./configure && make -j"$(nproc)"; \
+          elif [ -f autogen.sh ]; then ./autogen.sh && ./configure && make -j"$(nproc)"; \
+          else cd src && make -f Makefile.linux -j"$(nproc)" && cd ..; fi;
           if [ -f vpcs ]; then install -m 0755 vpcs /out/vpcs; \
           else install -m 0755 src/vpcs /out/vpcs; fi
         '
-
 
     - name: Install built binaries to host
       copy:
@@ -140,7 +143,7 @@
     ####################################################################
     - name: Create service user
       user:
-        name:  "{{ gns3_user }}"
+        name: "{{ gns3_user }}"
         system: yes
         create_home: yes
         home: /opt/gns3
@@ -166,7 +169,7 @@
         dest: /etc/gns3/gns3_server.conf
         owner: "{{ gns3_user }}"
         group: "{{ gns3_user }}"
-        mode:  "0644"
+        mode: "0644"
         content: |
           [Server]
           host = {{ gns3_host }}
