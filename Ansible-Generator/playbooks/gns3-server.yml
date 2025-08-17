@@ -1,5 +1,5 @@
 ---
-- name: Install and configure a standalone GNS3-server (venv-based, no python3-venv)
+- name: Install and configure GNS3-server with uBridge/Dynamips/VPCS (container-built)
   hosts: gns3-servers
   become: yes
   gather_facts: yes
@@ -8,11 +8,12 @@
     gns3_host:  "0.0.0.0"
     gns3_port:  3080
     gns3_user:  gns3
-    gns3_version: "2.2.54"        # stable 2.x
+    gns3_version: "2.2.54"
+    build_image: "ubuntu:22.04"         # clean builders; stable toolchains
 
   tasks:
     ####################################################################
-    # 0) PREP & MINIMAL DEPENDENCIES
+    # 0) PREP & MINIMAL HOST DEPS
     ####################################################################
     - name: Stop unattended-upgrades if present (avoid apt locks)
       systemd:
@@ -25,7 +26,7 @@
         update_cache: yes
         cache_valid_time: 3600
 
-    - name: Install base packages (no libvirt, avoid python3-venv)
+    - name: Install base host packages (no libvirt/dev toolchains)
       apt:
         name:
           - wget
@@ -36,25 +37,12 @@
           - git
           - build-essential
           - python3
-          - python3-pip               # use pip to create virtualenv
-        state: present
-
-    - name: Install build deps for uBridge/Dynamips/VPCS
-      apt:
-        name:
-          - libpcap-dev         # uBridge
-          - libelf-dev          # Dynamips
-          - cmake
-          - make
-          - gcc
-          - g++
-          - autoconf            # VPCS
-          - automake            # VPCS
-          - libtool             # VPCS
+          - python3-pip
+          - acl                     # for setcap if needed
         state: present
 
     ####################################################################
-    # 1) PYTHON VENV + GNS3 SERVER IN VENV (no apt python3-venv)
+    # 1) PYTHON VENV + GNS3 SERVER (HOST)
     ####################################################################
     - name: Ensure pip works
       command: python3 -m pip --version
@@ -74,7 +62,80 @@
       command: /opt/gns3/venv/bin/pip install gns3-server=={{ gns3_version }}
 
     ####################################################################
-    # 2) USER, DIRECTORIES, ANCILLARY TOOLS
+    # 2) BUILD uBRIDGE / DYNAMIPS / VPCS INSIDE DOCKER, COPY TO HOST
+    ####################################################################
+    - name: Install Docker engine on host
+      apt:
+        name:
+          - docker.io
+        state: present
+
+    - name: Ensure Docker service is running
+      systemd:
+        name: docker
+        state: started
+        enabled: yes
+
+    - name: Create build output directory on host
+      file:
+        path: /opt/gns3/build-out
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Pull builder image
+      command: docker pull {{ build_image }}
+
+    - name: Build uBridge/Dynamips/VPCS in clean container and copy out
+      shell: >
+        docker run --rm
+        -v /opt/gns3/build-out:/out
+        {{ build_image }} bash -lc '
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          apt-get install -y --no-install-recommends
+            git build-essential cmake make gcc g++ autoconf automake libtool
+            libpcap-dev libelf-dev ca-certificates pkg-config
+          # uBridge
+          cd /tmp && git clone https://github.com/GNS3/ubridge.git
+          cd /tmp/ubridge && make clean || true && make
+          install -m 0755 ubridge /out/ubridge
+          # Dynamips
+          cd /tmp && git clone https://github.com/GNS3/dynamips.git
+          cd /tmp/dynamips && mkdir -p build && cd build && cmake .. && make
+          install -m 0755 dynamips /out/dynamips
+          # VPCS
+          cd /tmp && git clone https://github.com/GNS3/vpcs.git
+          cd /tmp/vpcs
+          if [ -f configure ]; then ./configure && make; \
+          elif [ -f autogen.sh ]; then ./autogen.sh && ./configure && make; \
+          else cd src && make -f Makefile.linux; cd ..; fi
+          if [ -f vpcs ]; then install -m 0755 vpcs /out/vpcs; \
+          elif [ -f src/vpcs ]; then install -m 0755 src/vpcs /out/vpcs; fi
+        '
+
+    - name: Install built binaries to host
+      copy:
+        src: "/opt/gns3/build-out/{{ item }}"
+        dest: "/usr/local/bin/{{ item }}"
+        owner: root
+        group: root
+        mode: "0755"
+      loop:
+        - ubridge
+        - dynamips
+        - vpcs
+
+    - name: Grant ubridge raw socket/net admin capabilities (no root runs)
+      shell: "setcap cap_net_admin,cap_net_raw+eip /usr/local/bin/ubridge"
+      args:
+        warn: false
+      failed_when: false
+
+    ####################################################################
+    # 3) USER / DIRS / CONFIG
     ####################################################################
     - name: Create service user
       user:
@@ -99,56 +160,6 @@
         - /opt/gns3/projects
         - /var/log/gns3
 
-    - name: Build uBridge from source
-      shell: |
-        cd /tmp
-        rm -rf ubridge
-        git clone https://github.com/GNS3/ubridge.git
-        cd ubridge
-        make clean || true
-        make
-        make install
-      args:
-        warn: false
-      ignore_errors: yes
-
-    - name: Build Dynamips from source
-      shell: |
-        cd /tmp
-        rm -rf dynamips
-        git clone https://github.com/GNS3/dynamips.git
-        cd dynamips
-        mkdir -p build && cd build
-        cmake .. && make && make install
-      args:
-        warn: false
-      ignore_errors: yes
-
-    - name: Build VPCS from source
-      shell: |
-        cd /tmp
-        rm -rf vpcs
-        git clone https://github.com/GNS3/vpcs.git
-        cd vpcs
-        if [ -f configure ]; then
-          ./configure && make
-        elif [ -f autogen.sh ]; then
-          ./autogen.sh && ./configure && make
-        else
-          cd src && make -f Makefile.linux
-        fi
-        if [ -f vpcs ]; then
-          install -m 755 vpcs /usr/local/bin/vpcs
-        elif [ -f src/vpcs ]; then
-          install -m 755 src/vpcs /usr/local/bin/vpcs
-        fi
-      args:
-        warn: false
-      ignore_errors: yes
-
-    ####################################################################
-    # 3) CONFIGURATION
-    ####################################################################
     - name: Deploy gns3_server.conf
       copy:
         dest: /etc/gns3/gns3_server.conf
@@ -172,7 +183,7 @@
       notify: restart gns3
 
     ####################################################################
-    # 4) SYSTEMD SERVICE (runs venv binary)
+    # 4) SYSTEMD SERVICE (run venv binary)
     ####################################################################
     - name: Ensure gns3server binary exists in venv
       stat:
@@ -191,7 +202,7 @@
         content: |
           [Unit]
           Description=GNS3 Server (venv)
-          After=network.target
+          After=network.target docker.service
 
           [Service]
           User={{ gns3_user }}
@@ -237,7 +248,7 @@
       when: ufw_active.rc == 0
 
     ####################################################################
-    # 6) VERIFY SERVER IS RESPONDING
+    # 6) VERIFY API
     ####################################################################
     - name: Wait until the API responds
       uri:
@@ -256,6 +267,7 @@
           ================================
           REST API : http://{{ ansible_default_ipv4.address }}:{{ gns3_port }}
           Test     : curl http://{{ ansible_default_ipv4.address }}:{{ gns3_port }}/v2/version
+          Binaries : /usr/local/bin/ubridge, /usr/local/bin/dynamips, /usr/local/bin/vpcs
           Logs     : journalctl -u gns3 -f
 
   handlers:
