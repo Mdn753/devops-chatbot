@@ -8,8 +8,8 @@
     gns3_host: "0.0.0.0"
     gns3_port: 3080
     gns3_user: gns3
-    gns3_version: "2.2.54"            # stable 2.x
-    libpcap_ver: "1.10.4"             # libpcap to build from source
+    gns3_version: "2.2.54"        # stable 2.x
+    libpcap_ver: "1.10.4"         # build libpcap from source to avoid apt conflicts
 
   tasks:
     ####################################################################
@@ -26,7 +26,7 @@
         update_cache: yes
         cache_valid_time: 3600
 
-    - name: Install base runtime & build tools (no fragile dev chains)
+    - name: Install base runtime & build tools (minimal to avoid conflicts)
       apt:
         name:
           - wget
@@ -35,17 +35,17 @@
           - git
           - build-essential
           - pkg-config
-          - libelf-dev                  # needed by Dynamips
+          - libelf-dev              # Dynamips needs this
           - qemu-kvm
           - qemu-utils
           - bridge-utils
           - python3
           - python3-pip
-          - libcap2-bin                 # setcap for ubridge
+          - libcap2-bin             # setcap for ubridge
         state: present
 
     ####################################################################
-    # 1) PYTHON VENV + GNS3 SERVER (HOST)
+    # 1) PYTHON VENV + GNS3 SERVER
     ####################################################################
     - name: Ensure pip works
       command: python3 -m pip --version
@@ -70,7 +70,7 @@
       command: /opt/gns3/venv/bin/pip install cmake
 
     ####################################################################
-    # 2) BUILD LIBPCAP FROM SOURCE  (to avoid libpcap-dev apt conflicts)
+    # 2) BUILD LIBPCAP FROM SOURCE  (avoid libpcap-dev apt conflicts)
     ####################################################################
     - name: Download libpcap source tarball
       get_url:
@@ -102,8 +102,6 @@
         make -j"$(nproc)"
         make install
         ldconfig
-      args:
-        warn: false
       when: libpcap_tar is succeeded
 
     - name: Build & install libpcap (from git, autogen if needed)
@@ -120,8 +118,6 @@
         make -j"$(nproc)"
         make install
         ldconfig
-      args:
-        warn: false
       when: libpcap_tar is failed
 
     ####################################################################
@@ -138,8 +134,6 @@
         make clean || true
         make -j"$(nproc)"
         install -m 0755 ubridge /usr/local/bin/ubridge
-      args:
-        warn: false
 
     - name: Build and install Dynamips (use cmake from venv)
       shell: |
@@ -152,8 +146,6 @@
         /opt/gns3/venv/bin/cmake ..
         make -j"$(nproc)"
         install -m 0755 dynamips /usr/local/bin/dynamips
-      args:
-        warn: false
 
     - name: Build and install VPCS (prefer Makefile.linux to avoid autotools)
       shell: |
@@ -172,13 +164,9 @@
           if [ -f vpcs ]; then install -m 0755 vpcs /usr/local/bin/vpcs; \
           elif [ -f src/vpcs ]; then install -m 0755 src/vpcs /usr/local/bin/vpcs; fi
         fi
-      args:
-        warn: false
 
-    - name: Grant ubridge raw socket/net admin capabilities (so non-root can capture/bridge)
+    - name: Grant ubridge raw socket/net admin capabilities (non-root usage)
       shell: "setcap cap_net_admin,cap_net_raw+eip /usr/local/bin/ubridge"
-      args:
-        warn: false
       failed_when: false
 
     ####################################################################
