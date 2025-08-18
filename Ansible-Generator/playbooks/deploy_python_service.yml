@@ -5,18 +5,22 @@
   gather_facts: true
 
   vars:
-    # ---- Fill/override via AWX Survey or extra_vars on launch ----
-    app_name: "myapp"                                  # service name
-    app_repo: "https://github.com/you/your-app.git"    # Git repo (HTTP or SSH)
-    app_branch: "main"                                 # branch/tag/commit
-    app_entrypoint: "app.py"                           # script relative to repo root
-    app_user: "myapp"                                  # system user to run the app
-    app_dir: "/opt/{{ app_name }}"                     # code + venv live here
+    app_name: "myapp"
+    app_repo: "https://github.com/you/your-app.git"
+    app_branch: "main"
+    app_entrypoint: "app.py"
+    app_user: "myapp"
+    app_dir: "/opt/{{ app_name }}"
     venv_dir: "{{ app_dir }}/venv"
     env_file: "/etc/{{ app_name }}/.env"
-    expose_port: 0                                     # e.g. 8000 (0 = skip UFW rule)
-    # env_vars is a dict written to .env as KEY=VALUE
-    env_vars: {}                                       # e.g. {"ENV":"prod","PORT":"8000"}
+    expose_port: 0
+    env_vars: {}
+
+    # 🔐 optional: only needed for SSH repos like git@github.com:org/repo.git
+    deploy_key: ""                              # put the PRIVATE key here via extra_vars
+    deploy_key_path: "/etc/{{ app_name }}/deploy_key"
+    # host extracted from repo to seed known_hosts when using SSH
+    repo_host: "{{ (app_repo | regex_search('(?:@|://)([^/:]+)', '\\1')) | default('github.com') }}"
 
   pre_tasks:
     - name: Install base packages (Debian/Raspbian)
@@ -27,6 +31,8 @@
           - python3-venv
           - python3-pip
           - ufw
+          - ca-certificates
+          - openssh-client          # for ssh-keyscan / SSH transports
         state: present
         update_cache: yes
 
@@ -35,7 +41,7 @@
         name: "{{ app_user }}"
         system: true
         create_home: false
-        shell: /usr/sbin/nologin
+        shell: /bin/bash            # must be a real shell for services
 
     - name: Create directories
       ansible.builtin.file:
@@ -49,15 +55,54 @@
         - { path: "/etc/{{ app_name }}", owner: "root", group: "root", mode: "0750" }
         - { path: "/var/log/{{ app_name }}" }
 
+    # --- SSH repo helpers (safe to skip for HTTPS repos) ---
+    - name: Add {{ repo_host }} host key (SSH repos)
+      ansible.builtin.known_hosts:
+        name: "{{ repo_host }}"
+        key: "{{ lookup('pipe', 'ssh-keyscan -t rsa,ecdsa,ed25519 ' ~ repo_host ~ ' 2>/dev/null') }}"
+        state: present
+      when: app_repo is match('^(git@|ssh://)')
+
+    - name: Install deploy key (if provided)
+      ansible.builtin.copy:
+        dest: "{{ deploy_key_path }}"
+        owner: root
+        group: root
+        mode: "0600"
+        content: "{{ deploy_key }}"
+      when: deploy_key | length > 0
+
+    # --- Fail fast if repo is unreachable (no interactive prompts) ---
+    - name: Probe repo reachability (no prompts)
+      ansible.builtin.command:
+        cmd: git ls-remote --heads "{{ app_repo }}"
+      environment:
+        GIT_TERMINAL_PROMPT: "0"
+        # use our deploy key if given (SSH only)
+        GIT_SSH_COMMAND: >-
+          {{ (deploy_key | length > 0)
+             | ternary('ssh -i ' ~ deploy_key_path ~ ' -o StrictHostKeyChecking=accept-new', 'ssh -o StrictHostKeyChecking=accept-new') }}
+      register: probe
+      changed_when: false
+
   tasks:
-    - name: Checkout/Update code
+    - name: Checkout/Update code (non-interactive)
       ansible.builtin.git:
         repo: "{{ app_repo }}"
         dest: "{{ app_dir }}/src"
         version: "{{ app_branch }}"
         force: true
         update: true
-      register: git_result
+        single_branch: true
+        depth: 1
+        accept_hostkey: true
+        key_file: "{{ (deploy_key | length > 0) | ternary(deploy_key_path, omit) }}"
+      become_user: "{{ app_user }}"           # clone as the app user
+      environment:
+        GIT_TERMINAL_PROMPT: "0"
+        GIT_SSH_COMMAND: >-
+          {{ (deploy_key | length > 0)
+             | ternary('ssh -i ' ~ deploy_key_path ~ ' -o StrictHostKeyChecking=accept-new', 'ssh -o StrictHostKeyChecking=accept-new') }}
 
     - name: Ensure venv exists and install requirements (if any)
       ansible.builtin.pip:
@@ -65,7 +110,7 @@
         virtualenv: "{{ venv_dir }}"
         virtualenv_command: "python3 -m venv"
       register: pip_result
-      failed_when: false   # allow success if no requirements.txt
+      failed_when: false
 
     - name: Create .env from env_vars
       ansible.builtin.copy:
