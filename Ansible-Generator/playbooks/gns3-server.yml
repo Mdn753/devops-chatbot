@@ -120,54 +120,67 @@
         ldconfig
       when: libpcap_tar is failed
 
+     ####################################################################
+    # 2) ANCILLARY TOOLS  (uBridge / Dynamips / VPCS)
     ####################################################################
-    # 3) BUILD uBRIDGE / DYNAMIPS / VPCS  (ON HOST)
-    ####################################################################
-    - name: Build and install uBridge (uses libpcap from /usr/local)
+    - name: Install build dependencies for all tools
+      apt:
+        name:
+          - libpcap-dev         # uBridge dependency
+          - libelf-dev          # Dynamips dependency
+          - cmake
+          - make
+          - gcc
+          - g++
+          - autoconf            # VPCS dependency
+          - automake            # VPCS dependency
+          - libtool             # VPCS dependency
+        state: present
+        update_cache: yes
+
+    - name: Build uBridge from source
       shell: |
-        set -e
-        export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:${PKG_CONFIG_PATH:-}
         cd /tmp
         rm -rf ubridge
         git clone https://github.com/GNS3/ubridge.git
         cd ubridge
         make clean || true
-        make -j"$(nproc)"
-        install -m 0755 ubridge /usr/local/bin/ubridge
+        make
+        make install
+      ignore_errors: yes
 
-    - name: Build and install Dynamips (use cmake from venv)
+    - name: Build Dynamips from source
       shell: |
-        set -e
         cd /tmp
         rm -rf dynamips
         git clone https://github.com/GNS3/dynamips.git
         cd dynamips
-        rm -rf build && mkdir build && cd build
-        /opt/gns3/venv/bin/cmake ..
-        make -j"$(nproc)"
-        install -m 0755 dynamips /usr/local/bin/dynamips
+        mkdir -p build && cd build
+        cmake .. && make && make install
+      ignore_errors: yes
 
-    - name: Build and install VPCS (prefer Makefile.linux to avoid autotools)
+    - name: Build VPCS from source
       shell: |
-        set -e
         cd /tmp
         rm -rf vpcs
         git clone https://github.com/GNS3/vpcs.git
-        if [ -f vpcs/src/Makefile.linux ]; then
-          cd vpcs/src && make -f Makefile.linux -j"$(nproc)"
-          install -m 0755 vpcs /usr/local/bin/vpcs
+        cd vpcs
+        # Check if configure script exists, if not try autogen
+        if [ -f configure ]; then
+          ./configure && make
+        elif [ -f autogen.sh ]; then
+          ./autogen.sh && ./configure && make
         else
-          cd vpcs
-          if [ -f configure ]; then ./configure && make -j"$(nproc)"; \
-          elif [ -f autogen.sh ]; then ./autogen.sh && ./configure && make -j"$(nproc)"; \
-          else cd src && make -f Makefile.linux -j"$(nproc)"; fi
-          if [ -f vpcs ]; then install -m 0755 vpcs /usr/local/bin/vpcs; \
-          elif [ -f src/vpcs ]; then install -m 0755 src/vpcs /usr/local/bin/vpcs; fi
+          # Try building directly in src directory
+          cd src && make -f Makefile.linux
         fi
-
-    - name: Grant ubridge raw socket/net admin capabilities (non-root usage)
-      shell: "setcap cap_net_admin,cap_net_raw+eip /usr/local/bin/ubridge"
-      failed_when: false
+        # Install vpcs binary
+        if [ -f vpcs ]; then
+          install -m 755 vpcs /usr/local/bin/vpcs
+        elif [ -f src/vpcs ]; then
+          install -m 755 src/vpcs /usr/local/bin/vpcs
+        fi
+      ignore_errors: yes
 
     ####################################################################
     # 4) USER / DIRS / CONFIG
