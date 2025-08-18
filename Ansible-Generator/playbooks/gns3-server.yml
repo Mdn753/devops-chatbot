@@ -1,151 +1,208 @@
 ---
-- name: Install and configure a standalone GNS3-server
+- name: Install and configure GNS3-server + build uBridge/Dynamips/VPCS (no Docker)
   hosts: gns3-servers
   become: yes
   gather_facts: yes
 
   vars:
-    gns3_host:  "0.0.0.0"
-    gns3_port:  3080
-    gns3_user:  gns3
-    # last 2.x release that still ships .deb assets
-    gns3_version: "2.2.54"
+    gns3_host: "0.0.0.0"
+    gns3_port: 3080
+    gns3_user: gns3
+    gns3_version: "2.2.54"      # stable 2.x
+    libpcap_ver: "1.10.4"       # build libpcap from source to avoid apt libpcap-dev conflicts
 
-  ####################################################################
-  # 0) PREP & DEPENDENCIES
-  ####################################################################
   tasks:
-    - name: Stop unattended upgrades (avoid apt locks)
-      shell: |
-        systemctl stop unattended-upgrades || true
-        pkill -f unattended-upgr        || true
-        rm -f /var/lib/dpkg/lock-frontend \
-              /var/lib/apt/lists/lock   \
-              /var/cache/apt/archives/lock || true
-      changed_when: false
-      ignore_errors: yes
+    ####################################################################
+    # 0) PREP & MINIMAL HOST DEPS
+    ####################################################################
+    - name: Stop unattended-upgrades if present (avoid apt locks)
+      systemd:
+        name: unattended-upgrades
+        state: stopped
+      failed_when: false
 
-    - name: Install base & Python runtime packages
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Install base runtime & build tools (kept minimal to avoid conflicts)
       apt:
         name:
           - wget
           - curl
-          - qemu-kvm
-          - qemu-utils
-          - libvirt-daemon-system
-          - bridge-utils
+          - ca-certificates
           - git
           - build-essential
+          - pkg-config
+          - libelf-dev              # Dynamips need
+          - qemu-kvm
+          - qemu-utils
+          - bridge-utils
           - python3
           - python3-pip
-          - python3-setuptools     # GNS3 runtime deps
-          - python3-aiohttp
-          - python3-psutil
-          - python3-jsonschema
+          - libcap2-bin             # setcap for ubridge
+          - autoconf                # for libpcap (git fallback)
+          - automake                # for libpcap (git fallback)
+          - libtool                 # for libpcap (git fallback)
+          - flex                    # for libpcap (git fallback)
+          - bison                   # for libpcap (git fallback)
         state: present
-        update_cache: yes
-        lock_timeout: 300
 
     ####################################################################
-    # 1) INSTALL GNS3-SERVER  (.deb first → pip fallback)
+    # 1) PYTHON VENV + GNS3 SERVER
     ####################################################################
-    - name: Download GNS3-server .deb
+    - name: Ensure pip works
+      command: python3 -m pip --version
+
+    - name: Install/upgrade virtualenv via pip (allow system pip per PEP 668)
+      command: python3 -m pip install --upgrade virtualenv
+      environment:
+        PIP_BREAK_SYSTEM_PACKAGES: "1"
+
+    - name: Create Python virtualenv for GNS3
+      command: python3 -m virtualenv /opt/gns3/venv
+      args:
+        creates: /opt/gns3/venv/bin/python
+
+    - name: Upgrade pip/setuptools/wheel inside venv
+      command: /opt/gns3/venv/bin/pip install --upgrade pip setuptools wheel
+
+    - name: Install gns3-server in venv (pinned)
+      command: /opt/gns3/venv/bin/pip install gns3-server=={{ gns3_version }}
+
+    - name: Install CMake inside venv (avoid apt cmake)
+      command: /opt/gns3/venv/bin/pip install cmake
+
+    ####################################################################
+    # 2) BUILD LIBPCAP FROM SOURCE  (avoid libpcap-dev apt chain)
+    ####################################################################
+    - name: Download libpcap source tarball
       get_url:
-        url: "https://github.com/GNS3/gns3-server/releases/download/v{{ gns3_version }}/gns3-server_{{ gns3_version }}-1_all.deb"
-        dest: /tmp/gns3-server.deb
+        url: "https://www.tcpdump.org/release/libpcap-{{ libpcap_ver }}.tar.gz"
+        dest: "/tmp/libpcap-{{ libpcap_ver }}.tar.gz"
         mode: "0644"
-      register: deb_pkg
-      ignore_errors: yes       # 404 is OK – we fall back to pip
-
-    - name: Install GNS3-server from .deb (preferred)
-      apt:
-        deb: /tmp/gns3-server.deb
-        state: present
-      register: deb_install
-      when: deb_pkg is succeeded
+      register: libpcap_tar
       ignore_errors: yes
 
-    - name: Install GNS3-server from PyPI (fallback)
-      shell: >
-        pip3 install --break-system-packages --ignore-installed yarl
-        gns3-server=={{ gns3_version }}
-      when: deb_install is failed or deb_pkg is failed
-      register: pip_install
-      ignore_errors: no        # hard-fail if pip also fails
+    - name: Fallback – clone libpcap from Git if tarball fetch failed
+      git:
+        repo: "https://github.com/the-tcpdump-group/libpcap.git"
+        dest: "/tmp/libpcap-git"
+        version: master
+        depth: 1
+      when: libpcap_tar is failed
 
-    ####################################################################
-    # 2) ANCILLARY TOOLS  (uBridge / Dynamips / VPCS)
-    ####################################################################
-    - name: Install build dependencies for all tools
-      apt:
-        name:
-          - libpcap-dev         # uBridge dependency
-          - libelf-dev          # Dynamips dependency
-          - cmake
-          - make
-          - gcc
-          - g++
-          - autoconf            # VPCS dependency
-          - automake            # VPCS dependency
-          - libtool             # VPCS dependency
-        state: present
-        update_cache: yes
+    - name: Extract libpcap tarball
+      unarchive:
+        src: "/tmp/libpcap-{{ libpcap_ver }}.tar.gz"
+        dest: /tmp
+        remote_src: yes
+      when: libpcap_tar is succeeded
 
-    - name: Build uBridge from source
+    - name: Build & install libpcap (from tarball)
       shell: |
+        set -e
+        cd /tmp/libpcap-{{ libpcap_ver }}
+        ./configure
+        make -j"$(nproc)"
+        make install
+        echo "/usr/local/lib" > /etc/ld.so.conf.d/gns3-local.conf
+        ldconfig
+      when: libpcap_tar is succeeded
+
+    - name: Build & install libpcap (from git, autogen if needed)
+      shell: |
+        set -e
+        cd /tmp/libpcap-git
+        if [ -f ./configure ]; then
+          ./configure
+        elif [ -f ./autogen.sh ]; then
+          ./autogen.sh && ./configure
+        else
+          ./configure || true
+        fi
+        make -j"$(nproc)"
+        make install
+        echo "/usr/local/lib" > /etc/ld.so.conf.d/gns3-local.conf
+        ldconfig
+      when: libpcap_tar is failed
+
+    - name: Verify libpcap headers and tools are in /usr/local
+      shell: |
+        test -f /usr/local/include/pcap.h
+        test -x /usr/local/bin/pcap-config
+      register: pcap_check
+      changed_when: false
+
+    ####################################################################
+    # 3) BUILD uBRIDGE / DYNAMIPS / VPCS  (ON HOST)
+    ####################################################################
+    - name: Build and install uBridge (use libpcap from /usr/local)
+      shell: |
+        set -e
+        export PATH="/usr/local/sbin:/usr/local/bin:$PATH"
+        export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+        export PCAP_CONFIG="/usr/local/bin/pcap-config"
+        export CFLAGS="-I/usr/local/include ${CFLAGS:-}"
+        export LDFLAGS="-L/usr/local/lib ${LDFLAGS:-}"
         cd /tmp
         rm -rf ubridge
         git clone https://github.com/GNS3/ubridge.git
         cd ubridge
         make clean || true
-        make
-        make install
-      ignore_errors: yes
+        make -j"$(nproc)" PCAP_CONFIG="$PCAP_CONFIG"
+        install -m 0755 ubridge /usr/local/bin/ubridge
 
-    - name: Build Dynamips from source
+    - name: Refresh linker cache
+      command: ldconfig
+      changed_when: false
+
+    - name: Build and install Dynamips (use cmake from venv)
       shell: |
+        set -e
         cd /tmp
         rm -rf dynamips
         git clone https://github.com/GNS3/dynamips.git
         cd dynamips
-        mkdir -p build && cd build
-        cmake .. && make && make install
-      ignore_errors: yes
+        rm -rf build && mkdir build && cd build
+        /opt/gns3/venv/bin/cmake ..
+        make -j"$(nproc)"
+        install -m 0755 dynamips /usr/local/bin/dynamips
 
-    - name: Build VPCS from source
+    - name: Build and install VPCS (prefer Makefile.linux to avoid autotools)
       shell: |
+        set -e
         cd /tmp
         rm -rf vpcs
         git clone https://github.com/GNS3/vpcs.git
-        cd vpcs
-        # Check if configure script exists, if not try autogen
-        if [ -f configure ]; then
-          ./configure && make
-        elif [ -f autogen.sh ]; then
-          ./autogen.sh && ./configure && make
+        if [ -f vpcs/src/Makefile.linux ]; then
+          cd vpcs/src && make -f Makefile.linux -j"$(nproc)"
+          install -m 0755 vpcs /usr/local/bin/vpcs
         else
-          # Try building directly in src directory
-          cd src && make -f Makefile.linux
+          cd vpcs
+          if [ -f configure ]; then ./configure && make -j"$(nproc)"; \
+          elif [ -f autogen.sh ]; then ./autogen.sh && ./configure && make -j"$(nproc)"; \
+          else cd src && make -f Makefile.linux -j"$(nproc)"; fi
+          if [ -f vpcs ]; then install -m 0755 vpcs /usr/local/bin/vpcs; \
+          elif [ -f src/vpcs ]; then install -m 0755 src/vpcs /usr/local/bin/vpcs; fi
         fi
-        # Install vpcs binary
-        if [ -f vpcs ]; then
-          install -m 755 vpcs /usr/local/bin/vpcs
-        elif [ -f src/vpcs ]; then
-          install -m 755 src/vpcs /usr/local/bin/vpcs
-        fi
-      ignore_errors: yes
+
+    - name: Grant ubridge raw socket/net admin capabilities (non-root usage)
+      shell: "setcap cap_net_admin,cap_net_raw+eip /usr/local/bin/ubridge"
+      failed_when: false
 
     ####################################################################
-    # 3) FILESYSTEM & USER
+    # 4) USER / DIRS / CONFIG
     ####################################################################
     - name: Create service user
       user:
-        name:  "{{ gns3_user }}"
+        name: "{{ gns3_user }}"
         system: yes
         create_home: yes
         home: /opt/gns3
         shell: /usr/sbin/nologin
-        groups: kvm,libvirt
+        groups: kvm
 
     - name: Create GNS3 directories
       file:
@@ -156,6 +213,7 @@
         mode: "0755"
       loop:
         - /etc/gns3
+        - /opt/gns3
         - /opt/gns3/images
         - /opt/gns3/projects
         - /var/log/gns3
@@ -165,7 +223,7 @@
         dest: /etc/gns3/gns3_server.conf
         owner: "{{ gns3_user }}"
         group: "{{ gns3_user }}"
-        mode:  "0644"
+        mode: "0644"
         content: |
           [Server]
           host = {{ gns3_host }}
@@ -183,45 +241,35 @@
       notify: restart gns3
 
     ####################################################################
-    # 4) LOCATE gns3server BINARY  (fail if absent)
+    # 5) SYSTEMD SERVICE (run venv binary)
     ####################################################################
-    - name: Locate gns3server binary
-      shell: |
-        if command -v gns3server >/dev/null 2>&1; then
-          command -v gns3server
-        elif [ -x /usr/local/bin/gns3server ]; then
-          echo /usr/local/bin/gns3server
-        else
-          echo ""
-        fi
-      register: gns3server_path
-      changed_when: false
+    - name: Ensure gns3server binary exists in venv
+      stat:
+        path: /opt/gns3/venv/bin/gns3server
+      register: venv_srv
 
-    - name: Abort when gns3server not found
+    - name: Abort if venv gns3server not found
       fail:
-        msg: "gns3server binary not found anywhere – installation must have failed."
-      when: gns3server_path.stdout | trim == ""
+        msg: "Expected /opt/gns3/venv/bin/gns3server but it was not found."
+      when: not venv_srv.stat.exists
 
-    ####################################################################
-    # 5) SYSTEMD SERVICE
-    ####################################################################
     - name: Deploy gns3.service
       copy:
         dest: /etc/systemd/system/gns3.service
         mode: "0644"
         content: |
           [Unit]
-          Description=GNS3 Server
+          Description=GNS3 Server (venv)
           After=network.target
 
           [Service]
           User={{ gns3_user }}
           Group={{ gns3_user }}
           WorkingDirectory=/opt/gns3
-          ExecStart={{ gns3server_path.stdout | default('/usr/local/bin/gns3server') }} \
-                     --config /etc/gns3/gns3_server.conf \
-                     --local \
-                     --log /var/log/gns3/gns3.log
+          ExecStart=/opt/gns3/venv/bin/gns3server \
+                    --config /etc/gns3/gns3_server.conf \
+                    --local \
+                    --log /var/log/gns3/gns3.log
           Restart=always
           RestartSec=5
 
@@ -258,15 +306,15 @@
       when: ufw_active.rc == 0
 
     ####################################################################
-    # 7) VERIFY SERVER IS RESPONDING
+    # 7) VERIFY API
     ####################################################################
     - name: Wait until the API responds
       uri:
         url: "http://localhost:{{ gns3_port }}/v2/version"
         method: GET
       register: api_test
-      retries: 5
-      delay: 3
+      retries: 8
+      delay: 2
       until: api_test.status == 200
 
     - name: Print connection details
@@ -277,11 +325,9 @@
           ================================
           REST API : http://{{ ansible_default_ipv4.address }}:{{ gns3_port }}
           Test     : curl http://{{ ansible_default_ipv4.address }}:{{ gns3_port }}/v2/version
+          Binaries : /usr/local/bin/ubridge, /usr/local/bin/dynamips, /usr/local/bin/vpcs
           Logs     : journalctl -u gns3 -f
 
-  ####################################################################
-  # HANDLERS
-  ####################################################################
   handlers:
     - name: reload systemd
       systemd:
