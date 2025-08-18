@@ -21,14 +21,28 @@ services:
       - "5055"              
 
   n8n:
-    image: n8nio/n8n:1.101.1
+    image: n8nio/n8n:1.106.3
     environment:
       GENERIC_TIMEZONE: Africa/Casablanca
+      N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: "true"
     volumes:
       - n8n_data:/home/node/.n8n
       - ./n8n:/files
-    ports: ["5678:5678"]
 
+      # Windows host paths (quotes + forward slashes)
+      - "C:/Users/Legion/.ssh/id_ed25519:/tmp/host_id_ed25519:ro"
+      - "C:/Users/Legion/.ssh/known_hosts:/tmp/host_known_hosts:ro"
+
+      # Mount the startup script
+      - ./n8n-init.sh:/startup.sh:ro
+
+    ports:
+      - "5678:5678"
+
+    # Run our script (no fragile inline multi-line command)
+    entrypoint: ["/bin/sh", "/startup.sh"]
+
+    restart: unless-stopped
 
 
 volumes:

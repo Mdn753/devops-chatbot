@@ -1,6 +1,6 @@
 ---
 - name: Deploy Python app on Raspberry Pi
-  hosts: all
+  hosts: raspberry-vms
   become: true
   gather_facts: true
 
