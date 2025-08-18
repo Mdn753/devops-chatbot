@@ -8,12 +8,12 @@
     gns3_host: "0.0.0.0"
     gns3_port: 3080
     gns3_user: gns3
-    gns3_version: "2.2.54"      # GNS3 server version
-    libpcap_ver: "1.10.4"       # libpcap release to build from source
+    gns3_version: "2.2.54"
+    libpcap_ver: "1.10.4"
 
   tasks:
     ####################################################################
-    # 0) PREP & MINIMAL HOST DEPS (avoid apt libpcap/cmake to dodge conflicts)
+    # 0) PREP & MINIMAL HOST DEPS
     ####################################################################
     - name: Stop unattended-upgrades if present (avoid apt locks)
       systemd:
@@ -26,7 +26,7 @@
         update_cache: yes
         cache_valid_time: 3600
 
-    - name: Install base runtime & build tools (no cmake, no libpcap-dev)
+    - name: Install base runtime & build tools (no apt cmake/libpcap-dev)
       apt:
         name:
           - wget
@@ -35,20 +35,21 @@
           - git
           - build-essential
           - pkg-config
-          - libelf-dev           # Dynamips needs this
-          - uuid-dev             # Dynamips uses this on Debian/Ubuntu
+          - libelf-dev            # Dynamips
+          - uuid-dev              # Dynamips
+          - libnsl-dev            # Needed by Dynamips (-lnsl)
+          - zlib1g-dev            # Common CMake checks
           - qemu-kvm
           - qemu-utils
           - bridge-utils
           - python3
           - python3-pip
-          - libcap2-bin          # provides setcap for ubridge
-          # for libpcap (git fallback) toolchain
-          - autoconf
-          - automake
-          - libtool
-          - flex
-          - bison
+          - libcap2-bin           # setcap for ubridge
+          - autoconf              # for libpcap (git fallback)
+          - automake              # for libpcap (git fallback)
+          - libtool               # for libpcap (git fallback)
+          - flex                  # for libpcap (git fallback)
+          - bison                 # for libpcap (git fallback)
         state: present
 
     ####################################################################
@@ -77,7 +78,7 @@
       command: /opt/gns3/venv/bin/pip install gns3-server=={{ gns3_version }}
 
     ####################################################################
-    # 2) BUILD LIBPCAP FROM SOURCE  (avoid apt libpcap-dev chain)
+    # 2) BUILD LIBPCAP FROM SOURCE (avoid apt libpcap-dev dependency chain)
     ####################################################################
     - name: Download libpcap source tarball
       get_url:
@@ -138,7 +139,7 @@
       changed_when: false
 
     ####################################################################
-    # 3) BUILD uBRIDGE / DYNAMIPS / VPCS  (AGAINST /usr/local libpcap)
+    # 3) BUILD uBRIDGE / DYNAMIPS / VPCS (AGAINST /usr/local libpcap)
     ####################################################################
     - name: Build and install uBridge (link against /usr/local libpcap)
       shell: |
