@@ -1,5 +1,5 @@
 ---
-- name: Install and configure GNS3-server with uBridge/Dynamips/VPCS (container-built)
+- name: Install and configure GNS3-server + build uBridge/Dynamips/VPCS (no Docker)
   hosts: gns3-servers
   become: yes
   gather_facts: yes
@@ -8,8 +8,8 @@
     gns3_host: "0.0.0.0"
     gns3_port: 3080
     gns3_user: gns3
-    gns3_version: "2.2.54"
-    build_image: "buildpack-deps:jammy"   # has git/gcc/make preinstalled
+    gns3_version: "2.2.54"            # stable 2.x
+    libpcap_ver: "1.10.4"             # libpcap to build from source
 
   tasks:
     ####################################################################
@@ -26,20 +26,22 @@
         update_cache: yes
         cache_valid_time: 3600
 
-    - name: Install base host packages (no libvirt/dev toolchains)
+    - name: Install base runtime & build tools (no fragile dev chains)
       apt:
         name:
           - wget
           - curl
+          - ca-certificates
+          - git
+          - build-essential
+          - pkg-config
+          - libelf-dev                  # needed by Dynamips
           - qemu-kvm
           - qemu-utils
           - bridge-utils
-          - git
-          - build-essential
           - python3
           - python3-pip
-          - libcap2-bin          # provides setcap
-          - ca-certificates
+          - libcap2-bin                 # setcap for ubridge
         state: present
 
     ####################################################################
@@ -53,7 +55,7 @@
       environment:
         PIP_BREAK_SYSTEM_PACKAGES: "1"
 
-    - name: Create Python virtualenv for GNS3 (via virtualenv)
+    - name: Create Python virtualenv for GNS3
       command: python3 -m virtualenv /opt/gns3/venv
       args:
         creates: /opt/gns3/venv/bin/python
@@ -64,82 +66,123 @@
     - name: Install gns3-server in venv (pinned)
       command: /opt/gns3/venv/bin/pip install gns3-server=={{ gns3_version }}
 
+    - name: Install CMake inside venv (avoid apt cmake)
+      command: /opt/gns3/venv/bin/pip install cmake
+
     ####################################################################
-    # 2) BUILD uBRIDGE / DYNAMIPS / VPCS INSIDE DOCKER, COPY TO HOST
+    # 2) BUILD LIBPCAP FROM SOURCE  (to avoid libpcap-dev apt conflicts)
     ####################################################################
-    - name: Install Docker engine on host
-      apt:
-        name: docker.io
-        state: present
+    - name: Download libpcap source tarball
+      get_url:
+        url: "https://www.tcpdump.org/release/libpcap-{{ libpcap_ver }}.tar.gz"
+        dest: "/tmp/libpcap-{{ libpcap_ver }}.tar.gz"
+        mode: "0644"
+      register: libpcap_tar
+      ignore_errors: yes
 
-    - name: Ensure Docker service is running
-      systemd:
-        name: docker
-        state: started
-        enabled: yes
+    - name: Fallback – clone libpcap from Git if tarball fetch failed
+      git:
+        repo: "https://github.com/the-tcpdump-group/libpcap.git"
+        dest: "/tmp/libpcap-git"
+        version: master
+        depth: 1
+      when: libpcap_tar is failed
 
-    - name: Create build output directory on host
-      file:
-        path: /opt/gns3/build-out
-        state: directory
-        owner: root
-        group: root
-        mode: "0755"
+    - name: Extract libpcap tarball
+      unarchive:
+        src: "/tmp/libpcap-{{ libpcap_ver }}.tar.gz"
+        dest: /tmp
+        remote_src: yes
+      when: libpcap_tar is succeeded
 
-    - name: Pull builder image
-      command: docker pull {{ build_image }}
+    - name: Build & install libpcap (from tarball)
+      shell: |
+        cd /tmp/libpcap-{{ libpcap_ver }}
+        ./configure
+        make -j"$(nproc)"
+        make install
+        ldconfig
+      args:
+        warn: false
+      when: libpcap_tar is succeeded
 
-    - name: Build uBridge/Dynamips/VPCS in clean container and copy out
-      shell: >
-        docker run --rm
-        -v /opt/gns3/build-out:/out
-        {{ build_image }} bash -lc '
-          set -euxo pipefail;
-          export DEBIAN_FRONTEND=noninteractive;
-          # sanity: confirm git and gcc already exist in image
-          command -v git; command -v gcc;
-          # only the missing libs/tools
-          apt-get update;
-          apt-get install -y --no-install-recommends
-            cmake autoconf automake libtool libpcap-dev libelf-dev pkg-config ca-certificates;
-          # uBridge
-          cd /tmp && git clone https://github.com/GNS3/ubridge.git;
-          cd /tmp/ubridge && (make clean || true) && make -j"$(nproc)";
-          install -m 0755 ubridge /out/ubridge;
-          # Dynamips
-          cd /tmp && git clone https://github.com/GNS3/dynamips.git;
-          cd /tmp/dynamips && mkdir -p build && cd build && cmake .. && make -j"$(nproc)";
-          install -m 0755 dynamips /out/dynamips;
-          # VPCS
-          cd /tmp && git clone https://github.com/GNS3/vpcs.git;
-          cd /tmp/vpcs;
+    - name: Build & install libpcap (from git, autogen if needed)
+      shell: |
+        set -e
+        cd /tmp/libpcap-git
+        if [ -f ./configure ]; then
+          ./configure
+        elif [ -f ./autogen.sh ]; then
+          ./autogen.sh && ./configure
+        else
+          ./configure || true
+        fi
+        make -j"$(nproc)"
+        make install
+        ldconfig
+      args:
+        warn: false
+      when: libpcap_tar is failed
+
+    ####################################################################
+    # 3) BUILD uBRIDGE / DYNAMIPS / VPCS  (ON HOST)
+    ####################################################################
+    - name: Build and install uBridge (uses libpcap from /usr/local)
+      shell: |
+        set -e
+        export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:${PKG_CONFIG_PATH:-}
+        cd /tmp
+        rm -rf ubridge
+        git clone https://github.com/GNS3/ubridge.git
+        cd ubridge
+        make clean || true
+        make -j"$(nproc)"
+        install -m 0755 ubridge /usr/local/bin/ubridge
+      args:
+        warn: false
+
+    - name: Build and install Dynamips (use cmake from venv)
+      shell: |
+        set -e
+        cd /tmp
+        rm -rf dynamips
+        git clone https://github.com/GNS3/dynamips.git
+        cd dynamips
+        rm -rf build && mkdir build && cd build
+        /opt/gns3/venv/bin/cmake ..
+        make -j"$(nproc)"
+        install -m 0755 dynamips /usr/local/bin/dynamips
+      args:
+        warn: false
+
+    - name: Build and install VPCS (prefer Makefile.linux to avoid autotools)
+      shell: |
+        set -e
+        cd /tmp
+        rm -rf vpcs
+        git clone https://github.com/GNS3/vpcs.git
+        if [ -f vpcs/src/Makefile.linux ]; then
+          cd vpcs/src && make -f Makefile.linux -j"$(nproc)"
+          install -m 0755 vpcs /usr/local/bin/vpcs
+        else
+          cd vpcs
           if [ -f configure ]; then ./configure && make -j"$(nproc)"; \
           elif [ -f autogen.sh ]; then ./autogen.sh && ./configure && make -j"$(nproc)"; \
-          else cd src && make -f Makefile.linux -j"$(nproc)" && cd ..; fi;
-          if [ -f vpcs ]; then install -m 0755 vpcs /out/vpcs; \
-          else install -m 0755 src/vpcs /out/vpcs; fi
-        '
+          else cd src && make -f Makefile.linux -j"$(nproc)"; fi
+          if [ -f vpcs ]; then install -m 0755 vpcs /usr/local/bin/vpcs; \
+          elif [ -f src/vpcs ]; then install -m 0755 src/vpcs /usr/local/bin/vpcs; fi
+        fi
+      args:
+        warn: false
 
-    - name: Install built binaries to host
-      copy:
-        src: "/opt/gns3/build-out/{{ item }}"
-        dest: "/usr/local/bin/{{ item }}"
-        owner: root
-        group: root
-        mode: "0755"
-      loop:
-        - ubridge
-        - dynamips
-        - vpcs
-
-    - name: Grant ubridge raw socket/net admin capabilities (no root runs)
+    - name: Grant ubridge raw socket/net admin capabilities (so non-root can capture/bridge)
       shell: "setcap cap_net_admin,cap_net_raw+eip /usr/local/bin/ubridge"
       args:
         warn: false
       failed_when: false
 
     ####################################################################
-    # 3) USER / DIRS / CONFIG
+    # 4) USER / DIRS / CONFIG
     ####################################################################
     - name: Create service user
       user:
@@ -187,7 +230,7 @@
       notify: restart gns3
 
     ####################################################################
-    # 4) SYSTEMD SERVICE (run venv binary)
+    # 5) SYSTEMD SERVICE (run venv binary)
     ####################################################################
     - name: Ensure gns3server binary exists in venv
       stat:
@@ -206,7 +249,7 @@
         content: |
           [Unit]
           Description=GNS3 Server (venv)
-          After=network.target docker.service
+          After=network.target
 
           [Service]
           User={{ gns3_user }}
@@ -233,7 +276,7 @@
         daemon_reload: yes
 
     ####################################################################
-    # 5) FIREWALL
+    # 6) FIREWALL
     ####################################################################
     - name: Check if UFW is active
       shell: "ufw status | grep -q 'Status: active'"
@@ -252,7 +295,7 @@
       when: ufw_active.rc == 0
 
     ####################################################################
-    # 6) VERIFY API
+    # 7) VERIFY API
     ####################################################################
     - name: Wait until the API responds
       uri:
