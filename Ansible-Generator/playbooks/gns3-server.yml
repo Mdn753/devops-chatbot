@@ -38,18 +38,19 @@
           - libelf-dev            # Dynamips
           - uuid-dev              # Dynamips
           - libnsl-dev            # Needed by Dynamips (-lnsl)
-          - zlib1g-dev            # Common CMake checks
+          - zlib1g-dev            # Common for CMake checks
           - qemu-kvm
           - qemu-utils
           - bridge-utils
           - python3
           - python3-pip
           - libcap2-bin           # setcap for ubridge
-          - autoconf              # for libpcap (git fallback)
-          - automake              # for libpcap (git fallback)
-          - libtool               # for libpcap (git fallback)
-          - flex                  # for libpcap (git fallback)
-          - bison                 # for libpcap (git fallback)
+          # for libpcap (git fallback) toolchain
+          - autoconf
+          - automake
+          - libtool
+          - flex
+          - bison
         state: present
 
     ####################################################################
@@ -113,6 +114,8 @@
         echo "/usr/local/lib" > /etc/ld.so.conf.d/gns3-local.conf
         ldconfig
       when: libpcap_tar is succeeded
+      args:
+        executable: /bin/bash
 
     - name: Build & install libpcap (from git, autogen if needed)
       shell: |
@@ -130,6 +133,8 @@
         echo "/usr/local/lib" > /etc/ld.so.conf.d/gns3-local.conf
         ldconfig
       when: libpcap_tar is failed
+      args:
+        executable: /bin/bash
 
     - name: Verify libpcap headers and tools are in /usr/local
       shell: |
@@ -137,6 +142,8 @@
         test -x /usr/local/bin/pcap-config
       register: pcap_check
       changed_when: false
+      args:
+        executable: /bin/bash
 
     ####################################################################
     # 3) BUILD uBRIDGE / DYNAMIPS / VPCS (AGAINST /usr/local libpcap)
@@ -156,6 +163,8 @@
         make clean || true
         make -j"$(nproc)" PCAP_CONFIG="$PCAP_CONFIG"
         install -m 0755 ubridge /usr/local/bin/ubridge
+      args:
+        executable: /bin/bash
 
     - name: Refresh linker cache
       command: ldconfig
@@ -167,19 +176,33 @@
         export CMAKE_INCLUDE_PATH="/usr/local/include:${CMAKE_INCLUDE_PATH:-}"
         export CMAKE_LIBRARY_PATH="/usr/local/lib:${CMAKE_LIBRARY_PATH:-}"
         export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+
         cd /tmp
         rm -rf dynamips
         git clone https://github.com/GNS3/dynamips.git
         cd dynamips
         rm -rf build && mkdir build && cd build
+
+        # Configure
         /opt/gns3/venv/bin/cmake .. \
           -DDYNAMIPS_CODE=stable \
           -DCMAKE_INSTALL_PREFIX=/usr/local \
           -DPCAP_INCLUDE_DIR=/usr/local/include \
           -DPCAP_LIBRARY=/usr/local/lib/libpcap.so \
           -Wno-dev
-        make -j"$(nproc)"
-        install -m 0755 dynamips /usr/local/bin/dynamips
+
+        # Build and install via CMake (robust across target names)
+        /opt/gns3/venv/bin/cmake --build . -- -j"$(nproc)"
+        /opt/gns3/venv/bin/cmake --install .
+
+        # Sanity: ensure binary exists at expected path
+        test -x /usr/local/bin/dynamips || {
+          BIN="$(find . -maxdepth 2 -type f -perm -111 -name 'dynamips*' | head -n1)"
+          test -n "$BIN"
+          install -m 0755 "$BIN" /usr/local/bin/dynamips
+        }
+      args:
+        executable: /bin/bash
 
     - name: Build and install VPCS (prefer Makefile.linux to avoid autotools)
       shell: |
@@ -198,6 +221,8 @@
           if [ -f vpcs ]; then install -m 0755 vpcs /usr/local/bin/vpcs; \
           elif [ -f src/vpcs ]; then install -m 0755 src/vpcs /usr/local/bin/vpcs; fi
         fi
+      args:
+        executable: /bin/bash
 
     - name: Grant ubridge raw socket/net admin capabilities (non-root usage)
       shell: "setcap cap_net_admin,cap_net_raw+eip /usr/local/bin/ubridge"
