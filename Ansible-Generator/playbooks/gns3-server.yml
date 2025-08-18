@@ -8,8 +8,8 @@
     gns3_host: "0.0.0.0"
     gns3_port: 3080
     gns3_user: gns3
-    gns3_version: "2.2.54"      # stable 2.x
-    libpcap_ver: "1.10.4"       # build libpcap from source to avoid apt libpcap-dev conflicts
+    gns3_version: "2.2.54"
+    libpcap_ver: "1.10.4"
 
   tasks:
     ####################################################################
@@ -26,7 +26,7 @@
         update_cache: yes
         cache_valid_time: 3600
 
-    - name: Install base runtime & build tools (kept minimal to avoid conflicts)
+    - name: Install base runtime & build tools (minimal)
       apt:
         name:
           - wget
@@ -35,18 +35,19 @@
           - git
           - build-essential
           - pkg-config
-          - libelf-dev              # Dynamips need
+          - libelf-dev            # Dynamips needs this
+          - uuid-dev              # safe extra dep many guides include
           - qemu-kvm
           - qemu-utils
           - bridge-utils
           - python3
           - python3-pip
-          - libcap2-bin             # setcap for ubridge
-          - autoconf                # for libpcap (git fallback)
-          - automake                # for libpcap (git fallback)
-          - libtool                 # for libpcap (git fallback)
-          - flex                    # for libpcap (git fallback)
-          - bison                   # for libpcap (git fallback)
+          - libcap2-bin           # setcap for ubridge
+          - autoconf              # for libpcap (git fallback)
+          - automake              # for libpcap (git fallback)
+          - libtool               # for libpcap (git fallback)
+          - flex                  # for libpcap (git fallback)
+          - bison                 # for libpcap (git fallback)
         state: present
 
     ####################################################################
@@ -55,7 +56,7 @@
     - name: Ensure pip works
       command: python3 -m pip --version
 
-    - name: Install/upgrade virtualenv via pip (allow system pip per PEP 668)
+    - name: Install/upgrade virtualenv via pip (permit system pip)
       command: python3 -m pip install --upgrade virtualenv
       environment:
         PIP_BREAK_SYSTEM_PACKAGES: "1"
@@ -71,11 +72,11 @@
     - name: Install gns3-server in venv (pinned)
       command: /opt/gns3/venv/bin/pip install gns3-server=={{ gns3_version }}
 
-    - name: Install CMake inside venv (avoid apt cmake)
+    - name: Install CMake inside venv
       command: /opt/gns3/venv/bin/pip install cmake
 
     ####################################################################
-    # 2) BUILD LIBPCAP FROM SOURCE  (avoid libpcap-dev apt chain)
+    # 2) BUILD LIBPCAP FROM SOURCE  (avoid apt chain)
     ####################################################################
     - name: Download libpcap source tarball
       get_url:
@@ -158,15 +159,22 @@
       command: ldconfig
       changed_when: false
 
-    - name: Build and install Dynamips (use cmake from venv)
+    - name: Build and install Dynamips (use cmake from venv; point to /usr/local pcap)
       shell: |
         set -e
+        export CMAKE_INCLUDE_PATH="/usr/local/include:${CMAKE_INCLUDE_PATH:-}"
+        export CMAKE_LIBRARY_PATH="/usr/local/lib:${CMAKE_LIBRARY_PATH:-}"
+        export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
         cd /tmp
         rm -rf dynamips
         git clone https://github.com/GNS3/dynamips.git
         cd dynamips
         rm -rf build && mkdir build && cd build
-        /opt/gns3/venv/bin/cmake ..
+        /opt/gns3/venv/bin/cmake .. \
+          -DDYNAMIPS_CODE=stable \
+          -DCMAKE_INSTALL_PREFIX=/usr/local \
+          -DPCAP_INCLUDE_DIR=/usr/local/include \
+          -DPCAP_LIBRARY=/usr/local/lib/libpcap.so
         make -j"$(nproc)"
         install -m 0755 dynamips /usr/local/bin/dynamips
 
