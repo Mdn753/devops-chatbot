@@ -14,8 +14,6 @@
     wildfly_version: "36.0.1.Final"
     wildfly_tarball: "wildfly-{{ wildfly_version }}.tar.gz"
     wildfly_url: "https://github.com/wildfly/wildfly/releases/download/{{ wildfly_version }}/{{ wildfly_tarball }}"
-    # Official SHA256 for 36.0.1.Final tgz
-    wildfly_sha256: "1a0f71680cac962cef03173e81f5ff8886175f18292db158b75c8077cf4ac38d"
 
     wildfly_user: "wildfly"
     wildfly_group: "wildfly"
@@ -124,25 +122,49 @@
         shell: /usr/sbin/nologin
         system: yes
 
-    # Robust download with checksum to avoid corrupt/partial archives
+    # Robust download with SHA-1 verification (authoritative from releases)
     - name: Remove any stale WildFly tarball
       ansible.builtin.file:
         path: "/tmp/{{ wildfly_tarball }}"
         state: absent
 
-    - name: Download WildFly tarball (GitHub Releases, with checksum)
+    - name: Fetch official SHA-1 for WildFly build
+      ansible.builtin.uri:
+        url: "{{ wildfly_url }}.sha1"
+        return_content: true
+        status_code: 200
+      register: wf_sha1_resp
+      retries: 3
+      delay: 5
+      until: wf_sha1_resp.status == 200
+
+    - name: Parse SHA-1 value
+      ansible.builtin.set_fact:
+        wildfly_sha1_expected: "{{ (wf_sha1_resp.content | trim).split()[0] }}"
+
+    - name: Download WildFly tarball
       ansible.builtin.get_url:
         url: "{{ wildfly_url }}"
         dest: "/tmp/{{ wildfly_tarball }}"
         mode: "0644"
         timeout: 600
         force: true
-        checksum: "sha256:{{ wildfly_sha256 }}"
         validate_certs: yes
-      register: wildfly_dl
+      register: wf_dl
       retries: 3
-      delay: 5
-      until: wildfly_dl is succeeded
+      delay: 10
+      until: wf_dl is succeeded
+
+    - name: Compute SHA-1 of downloaded tarball
+      ansible.builtin.shell: "sha1sum /tmp/{{ wildfly_tarball }} | awk '{print $1}'"
+      args: { executable: /bin/bash }
+      register: wf_sha1_actual
+      changed_when: false
+
+    - name: Fail if SHA-1 mismatch (download likely truncated/HTML)
+      ansible.builtin.fail:
+        msg: "Checksum mismatch for {{ wildfly_tarball }}: expected {{ wildfly_sha1_expected }}, got {{ wf_sha1_actual.stdout }}. Try re-running."
+      when: wf_sha1_actual.stdout != wildfly_sha1_expected
 
     - name: Extract WildFly under /opt
       ansible.builtin.unarchive:
@@ -469,86 +491,4 @@
         {{ wildfly_home }}/bin/jboss-cli.sh -c
         --controller=127.0.0.1:{{ wildfly_mgmt_port }}
         --user='{{ mgmt_user }}' --password='{{ mgmt_password }}'
-        --commands="
-          if (outcome != success) of /interface=http:read-resource() then /interface=http:add(inet-address=0.0.0.0) end,
-          if (outcome != success) of /interface=https:read-resource() then /interface=https:add(inet-address=0.0.0.0) end,
-          if (outcome != success) of /socket-binding-group=standard-sockets/socket-binding=http:read-resource() then /socket-binding-group=standard-sockets/socket-binding=http:add(port={{ wildfly_http_port }},interface=http) end,
-          if (outcome != success) of /socket-binding-group=standard-sockets/socket-binding=https:read-resource() then /socket-binding-group=standard-sockets/socket-binding=https:add(port={{ wildfly_https_port }},interface=https) end,
-          if (outcome != success) of /subsystem=elytron/key-store=httpsKS:read-resource() then /subsystem=elytron/key-store=httpsKS:add(type=PKCS12, path=keystore/keystore.p12, relative-to=jboss.server.config.dir, credential-reference={{'{'}}clear-text={{ wf_keystore_pass }}{{'}'}}) end,
-          if (outcome != success) of /subsystem=elytron/key-manager=httpsKM:read-resource() then /subsystem=elytron/key-manager=httpsKM:add(key-store=httpsKS, alias={{ wf_keystore_alias }}, credential-reference={{'{'}}clear-text={{ wf_keystore_pass }}{{'}'}}) end,
-          if (outcome != success) of /subsystem=elytron/server-ssl-context=httpsSSC:read-resource() then /subsystem=elytron/server-ssl-context=httpsSSC:add(key-manager=httpsKM) end,
-          if (outcome != success) of /subsystem=undertow/server=default-server/http-listener=http:read-resource() then /subsystem=undertow/server=default-server/http-listener=http:add(socket-binding=http, redirect-socket=https) end,
-          if (outcome != success) of /subsystem=undertow/server=default-server/https-listener=https:read-resource() then /subsystem=undertow/server=default-server/https-listener=https:add(socket-binding=https, ssl-context=httpsSSC) end,
-          :reload
-        "
-      args: { executable: /bin/bash }
-
-    - name: Wait for HTTPS to listen
-      ansible.builtin.wait_for:
-        host: 127.0.0.1
-        port: "{{ wildfly_https_port }}"
-        timeout: 90
-
-    # -------------------- Optional: datasource health (again) -----------------
-    - name: Test EjbcaDS connection (post-deploy)
-      ansible.builtin.shell: >
-        {{ wildfly_home }}/bin/jboss-cli.sh -c
-        --controller=127.0.0.1:{{ wildfly_mgmt_port }}
-        --user='{{ mgmt_user }}' --password='{{ mgmt_password }}'
-        --commands="/subsystem=datasources/data-source=ejbcads:test-connection-in-pool"
-      args: { executable: /bin/bash }
-      register: dstest2
-      changed_when: false
-      failed_when: dstest2.rc != 0 and ((dstest2.stdout | regex_search('success')) is none)
-
-    # -------------------- Initialize CA (lab-friendly) --------------------
-    - name: Initialize a Management CA (non-interactive)
-      ansible.builtin.shell: |
-        set -e
-        export APPSRV_HOME="{{ wildfly_home }}"
-        cd {{ ejbca_root }}/src
-        bin/ejbca.sh ca init \
-          --caname "ManagementCA" \
-          --dn "CN=ManagementCA,O=Example,C=MA" \
-          --tokenType soft \
-          --tokenPass "changeit" \
-          --superAdminCN "SuperAdmin"
-      args: { executable: /bin/bash }
-      register: ca_init
-      changed_when: "'CA initialized' in ca_init.stdout or 'already exists' in ca_init.stdout"
-      failed_when: false
-
-    - name: Deploy RA Web (public UI)
-      ansible.builtin.shell: |
-        set -e
-        export APPSRV_HOME="{{ wildfly_home }}"
-        cd {{ ejbca_root }}/src
-        bin/ejbca.sh raweb deploy
-      args: { executable: /bin/bash }
-      register: raweb
-      changed_when: "'Deployed' in raweb.stdout"
-      failed_when: false
-
-    # -------------------- Firewall (optional) --------------------
-    - name: Ensure UFW allows 8080/8443
-      ansible.builtin.ufw:
-        rule: allow
-        port: "{{ item }}"
-        proto: tcp
-      loop: ["{{ wildfly_http_port }}", "{{ wildfly_https_port }}"]
-      when: ufw_enable
-
-    # -------------------- Output useful URLs --------------------
-    - name: Show URLs
-      ansible.builtin.debug:
-        msg:
-          - "HTTP  UI:  http://{{ ansible_default_ipv4.address }}:{{ wildfly_http_port }}/ejbca/"
-          - "HTTPS UI: https://{{ ansible_default_ipv4.address }}:{{ wildfly_https_port }}/ejbca/"
-          - "AdminWeb: https://{{ ansible_default_ipv4.address }}:{{ wildfly_https_port }}/ejbca/adminweb (needs client cert)"
-          - "Healthcheck: https://{{ ansible_default_ipv4.address }}:{{ wildfly_https_port }}/ejbca/publicweb/healthcheck/ejbcahealth (authorized IPs: {{ healthcheck_authorizedips }})"
-
-  handlers:
-    - name: Restart WildFly
-      ansible.builtin.service:
-        name: wildfly
-        state: restarted
+        --com
