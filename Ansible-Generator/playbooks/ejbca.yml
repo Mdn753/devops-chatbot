@@ -1,5 +1,5 @@
 ---
-- name: Native install of EJBCA CE on Ubuntu (WildFly 36 + MariaDB, robust CLI deploy + HTTPS)
+- name: Native install of EJBCA CE on Ubuntu (WildFly 36 + MariaDB, robust CLI deploy + HTTPS, fast download)
   hosts: ejbca
   become: yes
   gather_facts: yes
@@ -12,7 +12,7 @@
     java_pkg: openjdk-17-jdk
 
     wildfly_version: "36.0.1.Final"
-    # Pull from Maven Central instead of GitHub Releases (more reliable in proxied envs)
+    # Pull from Maven Central (reliable in proxied envs)
     wildfly_tarball: "wildfly-dist-{{ wildfly_version }}.tar.gz"
     wildfly_url: "https://repo1.maven.org/maven2/org/wildfly/wildfly-dist/{{ wildfly_version }}/{{ wildfly_tarball }}"
 
@@ -66,7 +66,7 @@
 
   tasks:
     # -------------------- Base packages --------------------
-    - name: Install base packages (Java, tools, DB server)
+    - name: Install base packages (Java, tools, DB server, aria2)
       ansible.builtin.apt:
         name:
           - "{{ java_pkg }}"
@@ -83,6 +83,7 @@
           - xz-utils
           - gzip
           - openssl
+          - aria2
         state: present
         update_cache: yes
 
@@ -123,13 +124,13 @@
         shell: /usr/sbin/nologin
         system: yes
 
-    # Robust download with SHA-1 verification from Maven Central
+    # Fast, resumable download with aria2c and checksum verification
     - name: Remove any stale WildFly tarball
       ansible.builtin.file:
         path: "/tmp/{{ wildfly_tarball }}"
         state: absent
 
-    - name: Fetch official SHA-1 for this WildFly build
+    - name: Fetch official SHA-1 for WildFly build (Maven Central)
       ansible.builtin.uri:
         url: "{{ wildfly_url }}.sha1"
         return_content: true
@@ -143,29 +144,17 @@
       ansible.builtin.set_fact:
         wildfly_sha1_expected: "{{ (wf_sha1_resp.content | trim).split()[0] }}"
 
-    - name: Download WildFly tarball
-      ansible.builtin.get_url:
-        url: "{{ wildfly_url }}"
-        dest: "/tmp/{{ wildfly_tarball }}"
-        mode: "0644"
-        timeout: 600
-        force: true
-        validate_certs: yes
-      register: wf_dl
+    - name: Download WildFly with aria2c (multi-conn, resumable, checksum)
+      ansible.builtin.shell: >
+        aria2c -x16 -s16 --file-allocation=none
+        --dir=/tmp --out={{ wildfly_tarball }}
+        --checksum=sha-1={{ wildfly_sha1_expected }}
+        "{{ wildfly_url }}"
+      args: { executable: /bin/bash }
+      register: aria2_out
       retries: 3
       delay: 10
-      until: wf_dl is succeeded
-
-    - name: Compute SHA-1 of downloaded tarball
-      ansible.builtin.shell: "sha1sum /tmp/{{ wildfly_tarball }} | awk '{print $1}'"
-      args: { executable: /bin/bash }
-      register: wf_sha1_actual
-      changed_when: false
-
-    - name: Fail if SHA-1 mismatch (download likely truncated/HTML)
-      ansible.builtin.fail:
-        msg: "Checksum mismatch for {{ wildfly_tarball }}: expected {{ wildfly_sha1_expected }}, got {{ wf_sha1_actual.stdout }}. Try re-running."
-      when: wf_sha1_actual.stdout != wildfly_sha1_expected
+      until: aria2_out.rc == 0
 
     - name: Extract WildFly under /opt
       ansible.builtin.unarchive:
