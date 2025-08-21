@@ -476,23 +476,101 @@
         fi
       args: { executable: /bin/bash }
 
-    - name: Configure interfaces, sockets, Elytron and HTTPS listener
+    # >>>>> Fixed: idempotent CLI adds (no 'then' syntax), ignore duplicates
+    - name: Ensure HTTP/HTTPS interfaces exist
       ansible.builtin.shell: >
         {{ wildfly_home }}/bin/jboss-cli.sh -c
         --controller=127.0.0.1:{{ wildfly_mgmt_port }}
         --user='{{ mgmt_user }}' --password='{{ mgmt_password }}'
-        --commands="
-          if (outcome != success) of /interface=http:read-resource() then /interface=http:add(inet-address=0.0.0.0) end,
-          if (outcome != success) of /interface=https:read-resource() then /interface=https:add(inet-address=0.0.0.0) end,
-          if (outcome != success) of /socket-binding-group=standard-sockets/socket-binding=http:read-resource() then /socket-binding-group=standard-sockets/socket-binding=http:add(port={{ wildfly_http_port }},interface=http) end,
-          if (outcome != success) of /socket-binding-group=standard-sockets/socket-binding=https:read-resource() then /socket-binding-group=standard-sockets/socket-binding=https:add(port={{ wildfly_https_port }},interface=https) end,
-          if (outcome != success) of /subsystem=elytron/key-store=httpsKS:read-resource() then /subsystem=elytron/key-store=httpsKS:add(type=PKCS12, path=keystore/keystore.p12, relative-to=jboss.server.config.dir, credential-reference={{'{'}}clear-text={{ wf_keystore_pass }}{{'}'}}) end,
-          if (outcome != success) of /subsystem=elytron/key-manager=httpsKM:read-resource() then /subsystem=elytron/key-manager=httpsKM:add(key-store=httpsKS, alias={{ wf_keystore_alias }}, credential-reference={{'{'}}clear-text={{ wf_keystore_pass }}{{'}'}}) end,
-          if (outcome != success) of /subsystem=elytron/server-ssl-context=httpsSSC:read-resource() then /subsystem=elytron/server-ssl-context=httpsSSC:add(key-manager=httpsKM) end,
-          if (outcome != success) of /subsystem=undertow/server=default-server/http-listener=http:read-resource() then /subsystem=undertow/server=default-server/http-listener=http:add(socket-binding=http, redirect-socket=https) end,
-          if (outcome != success) of /subsystem=undertow/server=default-server/https-listener=https:read-resource() then /subsystem=undertow/server=default-server/https-listener=https:add(socket-binding=https, ssl-context=httpsSSC) end,
-          :reload
-        "
+        --command="/interface={{ item }}:add(inet-address={{ wildfly_bind }})"
+      register: iface_cmd
+      changed_when: "iface_cmd.rc == 0"
+      failed_when: "iface_cmd.rc != 0 and ('Duplicate resource' not in (iface_cmd.stdout + iface_cmd.stderr)) and ('WFLYCTL0212' not in (iface_cmd.stdout + iface_cmd.stderr))"
+      loop:
+        - http
+        - https
+      args: { executable: /bin/bash }
+
+    - name: Ensure socket bindings for http/https
+      ansible.builtin.shell: >
+        {{ wildfly_home }}/bin/jboss-cli.sh -c
+        --controller=127.0.0.1:{{ wildfly_mgmt_port }}
+        --user='{{ mgmt_user }}' --password='{{ mgmt_password }}'
+        --command="/socket-binding-group=standard-sockets/socket-binding={{ item.name }}:add(port={{ item.port }},interface={{ item.iface }})"
+      register: sock_cmd
+      changed_when: "sock_cmd.rc == 0"
+      failed_when: "sock_cmd.rc != 0 and ('Duplicate resource' not in (sock_cmd.stdout + sock_cmd.stderr)) and ('WFLYCTL0212' not in (sock_cmd.stdout + sock_cmd.stderr))"
+      loop:
+        - { name: "http",  port: "{{ wildfly_http_port }}",  iface: "http"  }
+        - { name: "https", port: "{{ wildfly_https_port }}", iface: "https" }
+      args: { executable: /bin/bash }
+
+    - name: Ensure Elytron keystore exists
+      ansible.builtin.shell: >
+        {{ wildfly_home }}/bin/jboss-cli.sh -c
+        --controller=127.0.0.1:{{ wildfly_mgmt_port }}
+        --user='{{ mgmt_user }}' --password='{{ mgmt_password }}'
+        --command="/subsystem=elytron/key-store=httpsKS:add(type=PKCS12, path=keystore/keystore.p12, relative-to=jboss.server.config.dir, credential-reference={{'{'}}clear-text=${WF_PASS}{{'}'}})"
+      register: ks_cmd
+      environment:
+        WF_PASS: "{{ wf_keystore_pass }}"
+      changed_when: "ks_cmd.rc == 0"
+      failed_when: "ks_cmd.rc != 0 and ('Duplicate resource' not in (ks_cmd.stdout + ks_cmd.stderr)) and ('WFLYCTL0212' not in (ks_cmd.stdout + ks_cmd.stderr))"
+      args: { executable: /bin/bash }
+
+    - name: Ensure Elytron key-manager exists
+      ansible.builtin.shell: >
+        {{ wildfly_home }}/bin/jboss-cli.sh -c
+        --controller=127.0.0.1:{{ wildfly_mgmt_port }}
+        --user='{{ mgmt_user }}' --password='{{ mgmt_password }}'
+        --command="/subsystem=elytron/key-manager=httpsKM:add(key-store=httpsKS, alias={{ wf_keystore_alias }}, credential-reference={{'{'}}clear-text=${WF_PASS}{{'}'}})"
+      register: km_cmd
+      environment:
+        WF_PASS: "{{ wf_keystore_pass }}"
+      changed_when: "km_cmd.rc == 0"
+      failed_when: "km_cmd.rc != 0 and ('Duplicate resource' not in (km_cmd.stdout + km_cmd.stderr)) and ('WFLYCTL0212' not in (km_cmd.stdout + km_cmd.stderr))"
+      args: { executable: /bin/bash }
+
+    - name: Ensure Elytron server SSL context exists
+      ansible.builtin.shell: >
+        {{ wildfly_home }}/bin/jboss-cli.sh -c
+        --controller=127.0.0.1:{{ wildfly_mgmt_port }}
+        --user='{{ mgmt_user }}' --password='{{ mgmt_password }}'
+        --command="/subsystem=elytron/server-ssl-context=httpsSSC:add(key-manager=httpsKM)"
+      register: ssc_cmd
+      changed_when: "ssc_cmd.rc == 0"
+      failed_when: "ssc_cmd.rc != 0 and ('Duplicate resource' not in (ssc_cmd.stdout + ssc_cmd.stderr)) and ('WFLYCTL0212' not in (ssc_cmd.stdout + ssc_cmd.stderr))"
+      args: { executable: /bin/bash }
+
+    - name: Ensure Undertow HTTP listener exists (redirect to HTTPS)
+      ansible.builtin.shell: >
+        {{ wildfly_home }}/bin/jboss-cli.sh -c
+        --controller=127.0.0.1:{{ wildfly_mgmt_port }}
+        --user='{{ mgmt_user }}' --password='{{ mgmt_password }}'
+        --command="/subsystem=undertow/server=default-server/http-listener=http:add(socket-binding=http, redirect-socket=https)"
+      register: u_http_cmd
+      changed_when: "u_http_cmd.rc == 0"
+      failed_when: "u_http_cmd.rc != 0 and ('Duplicate resource' not in (u_http_cmd.stdout + u_http_cmd.stderr)) and ('WFLYCTL0212' not in (u_http_cmd.stdout + u_http_cmd.stderr))"
+      args: { executable: /bin/bash }
+
+    - name: Ensure Undertow HTTPS listener exists
+      ansible.builtin.shell: >
+        {{ wildfly_home }}/bin/jboss-cli.sh -c
+        --controller=127.0.0.1:{{ wildfly_mgmt_port }}
+        --user='{{ mgmt_user }}' --password='{{ mgmt_password }}'
+        --command="/subsystem=undertow/server=default-server/https-listener=https:add(socket-binding=https, ssl-context=httpsSSC)"
+      register: u_https_cmd
+      changed_when: "u_https_cmd.rc == 0"
+      failed_when: "u_https_cmd.rc != 0 and ('Duplicate resource' not in (u_https_cmd.stdout + u_https_cmd.stderr)) and ('WFLYCTL0212' not in (u_https_cmd.stdout + u_https_cmd.stderr))"
+      args: { executable: /bin/bash }
+
+    - name: Reload WildFly to apply HTTPS
+      ansible.builtin.shell: >
+        {{ wildfly_home }}/bin/jboss-cli.sh -c
+        --controller=127.0.0.1:{{ wildfly_mgmt_port }}
+        --user='{{ mgmt_user }}' --password='{{ mgmt_password }}'
+        --command=":reload"
+      changed_when: true
       args: { executable: /bin/bash }
 
     - name: Wait for HTTPS to listen
