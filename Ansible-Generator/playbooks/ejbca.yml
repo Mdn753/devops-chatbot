@@ -1,5 +1,5 @@
 ---
-- name: Native install of EJBCA CE on Ubuntu (WildFly 36 + MariaDB, robust CLI deploy)
+- name: Native install of EJBCA CE on Ubuntu (WildFly 36 + MariaDB, robust CLI deploy + HTTPS)
   hosts: ejbca
   become: yes
   gather_facts: yes
@@ -14,6 +14,8 @@
     wildfly_version: "36.0.1.Final"
     wildfly_tarball: "wildfly-{{ wildfly_version }}.tar.gz"
     wildfly_url: "https://github.com/wildfly/wildfly/releases/download/{{ wildfly_version }}/{{ wildfly_tarball }}"
+    # Official SHA256 for 36.0.1.Final tgz
+    wildfly_sha256: "1a0f71680cac962cef03173e81f5ff8886175f18292db158b75c8077cf4ac38d"
 
     wildfly_user: "wildfly"
     wildfly_group: "wildfly"
@@ -44,6 +46,16 @@
     db_host: "127.0.0.1"
     db_port: 3306
 
+    # ===== HTTPS (WildFly) =====
+    wf_keystore_dir: "/opt/wildfly/standalone/configuration/keystore"
+    wf_keystore_file: "{{ wf_keystore_dir }}/keystore.p12"
+    wf_keystore_alias: "wildfly"
+    wf_keystore_pass: "serverpwd"         # testing only; store securely later
+
+    # ===== EJBCA settings =====
+    # allow healthcheck from localhost + any (adjust for production)
+    healthcheck_authorizedips: "127.0.0.1;ANY"
+
     # ===== Firewall (optional) =====
     ufw_enable: false
 
@@ -59,6 +71,7 @@
       ansible.builtin.apt:
         name:
           - "{{ java_pkg }}"
+          - ca-certificates
           - unzip
           - curl
           - wget
@@ -67,6 +80,10 @@
           - python3-pip
           - mariadb-server
           - python3-pymysql
+          - tar
+          - xz-utils
+          - gzip
+          - openssl
         state: present
         update_cache: yes
 
@@ -107,12 +124,21 @@
         shell: /usr/sbin/nologin
         system: yes
 
-    - name: Download WildFly tarball (GitHub Releases)
+    # Robust download with checksum to avoid corrupt/partial archives
+    - name: Remove any stale WildFly tarball
+      ansible.builtin.file:
+        path: "/tmp/{{ wildfly_tarball }}"
+        state: absent
+
+    - name: Download WildFly tarball (GitHub Releases, with checksum)
       ansible.builtin.get_url:
         url: "{{ wildfly_url }}"
         dest: "/tmp/{{ wildfly_tarball }}"
         mode: "0644"
-        timeout: 120
+        timeout: 600
+        force: true
+        checksum: "sha256:{{ wildfly_sha256 }}"
+        validate_certs: yes
       register: wildfly_dl
       retries: 3
       delay: 5
@@ -178,7 +204,7 @@
       ansible.builtin.wait_for:
         host: 127.0.0.1
         port: "{{ wildfly_mgmt_port }}"
-        timeout: 90
+        timeout: 120
 
     # -------------------- Management user --------------------
     - name: Stat mgmt user file
@@ -355,6 +381,7 @@
           datasource.jndi=java:/EjbcaDS
           web.pub.http.port={{ wildfly_http_port }}
           web.pub.https.port={{ wildfly_https_port }}
+          healthcheck.authorizedips={{ healthcheck_authorizedips }}
 
     # -------------------- Build (no auto-deploy) --------------------
     - name: Build EJBCA (produce dist/ejbca.ear)
@@ -414,6 +441,53 @@
       delay: 6
       until: depinfo.rc == 0
 
+    # -------------------- Enable HTTPS listener on WildFly (Elytron/Undertow) ---
+    - name: Create keystore dir
+      ansible.builtin.file:
+        path: "{{ wf_keystore_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Generate self-signed TLS cert & PKCS12 keystore (testing)
+      ansible.builtin.shell: |
+        set -e
+        cd "{{ wf_keystore_dir }}"
+        if [ ! -f server.crt ] || [ ! -f server.key ]; then
+          openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
+            -subj "/CN={{ ansible_fqdn | default(inventory_hostname) }}" \
+            -keyout server.key -out server.crt
+        fi
+        if [ ! -f "{{ wf_keystore_file }}" ]; then
+          openssl pkcs12 -export -in server.crt -inkey server.key \
+            -out "{{ wf_keystore_file }}" -name "{{ wf_keystore_alias }}" \
+            -passout pass:{{ wf_keystore_pass }}
+        fi
+      args: { executable: /bin/bash }
+
+    - name: Configure interfaces, sockets, Elytron and HTTPS listener
+      ansible.builtin.shell: >
+        {{ wildfly_home }}/bin/jboss-cli.sh -c
+        --controller=127.0.0.1:{{ wildfly_mgmt_port }}
+        --user='{{ mgmt_user }}' --password='{{ mgmt_password }}'
+        --commands="
+          if (outcome != success) of /interface=http:read-resource() then /interface=http:add(inet-address=0.0.0.0) end,
+          if (outcome != success) of /interface=https:read-resource() then /interface=https:add(inet-address=0.0.0.0) end,
+          if (outcome != success) of /socket-binding-group=standard-sockets/socket-binding=http:read-resource() then /socket-binding-group=standard-sockets/socket-binding=http:add(port={{ wildfly_http_port }},interface=http) end,
+          if (outcome != success) of /socket-binding-group=standard-sockets/socket-binding=https:read-resource() then /socket-binding-group=standard-sockets/socket-binding=https:add(port={{ wildfly_https_port }},interface=https) end,
+          if (outcome != success) of /subsystem=elytron/key-store=httpsKS:read-resource() then /subsystem=elytron/key-store=httpsKS:add(type=PKCS12, path=keystore/keystore.p12, relative-to=jboss.server.config.dir, credential-reference={{'{'}}clear-text={{ wf_keystore_pass }}{{'}'}}) end,
+          if (outcome != success) of /subsystem=elytron/key-manager=httpsKM:read-resource() then /subsystem=elytron/key-manager=httpsKM:add(key-store=httpsKS, alias={{ wf_keystore_alias }}, credential-reference={{'{'}}clear-text={{ wf_keystore_pass }}{{'}'}}) end,
+          if (outcome != success) of /subsystem=elytron/server-ssl-context=httpsSSC:read-resource() then /subsystem=elytron/server-ssl-context=httpsSSC:add(key-manager=httpsKM) end,
+          if (outcome != success) of /subsystem=undertow/server=default-server/http-listener=http:read-resource() then /subsystem=undertow/server=default-server/http-listener=http:add(socket-binding=http, redirect-socket=https) end,
+          if (outcome != success) of /subsystem=undertow/server=default-server/https-listener=https:read-resource() then /subsystem=undertow/server=default-server/https-listener=https:add(socket-binding=https, ssl-context=httpsSSC) end,
+          :reload
+        "
+      args: { executable: /bin/bash }
+
+    - name: Wait for HTTPS to listen
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: "{{ wildfly_https_port }}"
+        timeout: 90
 
     # -------------------- Optional: datasource health (again) -----------------
     - name: Test EjbcaDS connection (post-deploy)
@@ -463,6 +537,15 @@
         proto: tcp
       loop: ["{{ wildfly_http_port }}", "{{ wildfly_https_port }}"]
       when: ufw_enable
+
+    # -------------------- Output useful URLs --------------------
+    - name: Show URLs
+      ansible.builtin.debug:
+        msg:
+          - "HTTP  UI:  http://{{ ansible_default_ipv4.address }}:{{ wildfly_http_port }}/ejbca/"
+          - "HTTPS UI: https://{{ ansible_default_ipv4.address }}:{{ wildfly_https_port }}/ejbca/"
+          - "AdminWeb: https://{{ ansible_default_ipv4.address }}:{{ wildfly_https_port }}/ejbca/adminweb (needs client cert)"
+          - "Healthcheck: https://{{ ansible_default_ipv4.address }}:{{ wildfly_https_port }}/ejbca/publicweb/healthcheck/ejbcahealth (authorized IPs: {{ healthcheck_authorizedips }})"
 
   handlers:
     - name: Restart WildFly

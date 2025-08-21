@@ -13,3 +13,16 @@ rules:
   steps:
     - intent: setup_GNS3  
     - action: action_setup_GNS3
+- rule: start deploy form
+  steps:
+    - intent: deploy_app
+    - action: deploy_form
+    - active_loop: deploy_form
+- rule: submit deploy form
+  condition:
+    - active_loop: deploy_form
+  steps:
+    - action: deploy_form
+    - active_loop: null
+    - action: action_launch_deploy
+    - action: utter_deploy_started

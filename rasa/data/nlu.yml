@@ -2,6 +2,7 @@ version: "3.1"
 
 nlu:
 
+# ── small talk ───────────────────────────────────────────────
 - intent: greet
   examples: |
     - hello
@@ -9,6 +10,7 @@ nlu:
     - hey there
     - good morning
 
+# ── infra intents ────────────────────────────────────────────
 - intent: create_vm
   examples: |
     - spin a new vm
@@ -26,7 +28,6 @@ nlu:
     - create a vm called [monitor-01](vm_name) and install zabbix
     - bootstrap zabbix on [prod-zbx](vm_name)
 
-
 - intent: setup_GNS3
   examples: |
     - set up GNS3
@@ -37,6 +38,30 @@ nlu:
     - create a vm called [monitor-01](vm_name) and install GNS3
     - bootstrap GNS3 on [prod-zbx](vm_name)
 
-regex:
-- name: vm_name
-  pattern: "[A-Za-z0-9._-]+"
+# ── deploy intent ────────────────────────────────────────────
+- intent: deploy_app
+  examples: |
+    - deploy this app: [https://github.com/Azure-Samples/python-docs-hello-world.git](repo)
+    - deploy repo [https://github.com/user/proj.git](repo) on port [8000](port)
+    - deploy [ml-api](name) from [https://github.com/you/your-app.git](repo) branch [main](branch)
+    - ship a python app from [git@github.com:org/repo.git](repo)
+    - roll out [demo](name) at port [5000](port)
+    - deploy [https://github.com/org/app.git](repo) on port [3000](port)
+    - deploy repo [git@github.com:org/api.git](repo) branch [main](branch) on port [8080](port)
+    - deploy [hello](name) from [https://github.com/Azure-Samples/python-docs-hello-world.git](repo) on port [8000](port)
+
+# ── regexes for robust entity extraction ─────────────────────
+# vm_name must start with a letter → avoids "8000" being taken as a name
+- regex: vm_name
+  examples: |
+    - (?=.{1,63}$)[A-Za-z][A-Za-z0-9._-]*
+
+# numeric ports (exact range enforced by your validator)
+- regex: port
+  examples: |
+    - \b[1-9][0-9]{1,4}\b
+
+# GitHub URLs ending with .git (https or git@)
+- regex: repo
+  examples: |
+    - (https?://|git@)github\.com[:/][^\s]+\.git

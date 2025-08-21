@@ -31,17 +31,23 @@ from random import randint
 from rasa_sdk import Action, Tracker
 from rasa_sdk.executor import CollectingDispatcher
 from typing import Any, Dict, List
-from rasa_sdk.events import SlotSet
+from rasa_sdk.events import SlotSet, EventType
+from rasa_sdk.types import DomainDict
+from rasa_sdk.forms import FormValidationAction
+
+import os, re, typing as t, requests
 
 
-N8N_URL = os.getenv("N8N_WEBHOOK_URL",
-                    "http://host.docker.internal:5678/webhook-test/create_vm")
+N8N_BASE = os.getenv("N8N_BASE", "http://n8n:5678")  # use your compose service name
+
+N8N_GNS3_URL = os.getenv("N8N_GNS3_URL", f"{N8N_BASE}/webhook-test/gns3_setup")
+N8N_ZABBIX_URL = os.getenv("N8N_ZABBIX_URL", f"{N8N_BASE}/webhook-test/zabbix_setup")
+N8N_PYTHON_PROJECT_URL = os.getenv("N8N_PYTHON_PROJECT_URL", f"{N8N_BASE}/webhook-test/python_project")
+N8N_CREATE_VM_URL = os.getenv("N8N_CREATE_VM_URL", f"{N8N_BASE}/webhook-test/create_vm")
 
 
-N8N_ZABBIX_URL = os.getenv(
-    "N8N_ZABBIX_URL",
-    "http://host.docker.internal:5678/webhook-test/zabbix_setup",
-)
+
+REPO_RX = re.compile(r"^(https?://|git@)[^ \t]+\.git$", re.I)
 class ActionCreateVM(Action):
     def name(self):
         return "action_create_vm"
@@ -49,7 +55,7 @@ class ActionCreateVM(Action):
     async def run(self, dispatcher: CollectingDispatcher,
                   tracker: Tracker, domain: dict):
         vm_name = f"vm-{randint(1000,9999)}"
-        r = requests.post(N8N_URL, json={"name": vm_name})
+        r = requests.post(N8N_CREATE_VM_URL, json={"name": vm_name})
         dispatcher.utter_message(r.json().get("message",
                              f"Launching {vm_name} …"))
         return []
@@ -132,7 +138,7 @@ class ActionSetupGNS3(Action):
         try:
             payload = {"name": vm_name, "install": "gns3", "auto": was_auto}
             r = requests.post(
-                "http://host.docker.internal:5678/webhook-test/gns3_setup",
+                N8N_GNS3_URL,
                 json=payload,
                 timeout=9000000
             )
@@ -149,3 +155,75 @@ class ActionSetupGNS3(Action):
             dispatcher.utter_message(f"Failed to reach n8n: {e}")
 
         return [SlotSet("vm_name", vm_name)]
+
+
+
+def _derive_name_from_repo(repo: str) -> str:
+    # e.g. https://github.com/user/proj.git -> proj
+    base = repo.rstrip("/").split("/")[-1]
+    return base[:-4] if base.endswith(".git") else base
+
+class ValidateDeployForm(FormValidationAction):
+    def name(self) -> str: return "validate_deploy_form"
+
+    def validate_repo(self, slot_value: str, dispatcher: CollectingDispatcher,
+                      tracker: Tracker, domain: DomainDict) -> dict:
+        v = (slot_value or "").strip()
+        if REPO_RX.search(v):
+            return {"repo": v}
+        dispatcher.utter_message(text="That doesn’t look like a git URL. Please paste something like https://github.com/user/repo.git or git@github.com:user/repo.git")
+        return {"repo": None}
+
+    def validate_name(self, slot_value: str, dispatcher, tracker, domain) -> dict:
+        v = (slot_value or "").strip()
+        if not v:
+            repo = tracker.get_slot("repo") or ""
+            v = _derive_name_from_repo(repo) or "ml-api"
+        return {"name": v}
+
+    def validate_branch(self, slot_value: str, dispatcher, tracker, domain) -> dict:
+        v = (slot_value or "").strip() or "main"
+        return {"branch": v}
+
+    def validate_entrypoint(self, slot_value: str, dispatcher, tracker, domain) -> dict:
+        v = (slot_value or "").strip() or "app.py"
+        return {"entrypoint": v}
+
+    def validate_port(self, slot_value: t.Any, dispatcher, tracker, domain) -> dict:
+        try:
+            p = int(str(slot_value).strip())
+        except Exception:
+            dispatcher.utter_message(text="Port must be a number (0-65535).")
+            return {"port": None}
+        if 0 <= p <= 65535:
+            return {"port": p}
+        dispatcher.utter_message(text="Port must be between 0 and 65535.")
+        return {"port": None}
+
+class ActionLaunchDeploy(Action):
+    def name(self) -> str: return "action_launch_deploy"
+
+    def run(self, dispatcher: CollectingDispatcher, tracker: Tracker, domain: DomainDict) -> t.List[EventType]:
+        repo = tracker.get_slot("repo")
+        name = tracker.get_slot("name")
+        branch = tracker.get_slot("branch") or "main"
+        entry = tracker.get_slot("entrypoint") or "app.py"
+        port = tracker.get_slot("port") or 0
+
+        # Build the payload your n8n Webhook expects (you can add env, limit, etc.)
+        payload = {
+            "repo": repo,
+            "branch": branch,
+            "name": name,
+            "entrypoint": entry,
+            "port": port,
+            "env": {"PORT": str(port)}
+        }
+
+        try:
+            r = requests.post(N8N_PYTHON_PROJECT_URL, json=payload, timeout=20)
+            r.raise_for_status()
+            dispatcher.utter_message(text=f"Okay, I’ve sent the deploy request for {name}.")
+        except Exception as e:
+            dispatcher.utter_message(text=f"Couldn’t reach the deploy service: {e}")
+        return []

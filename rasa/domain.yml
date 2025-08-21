@@ -5,17 +5,44 @@ intents:
   - create_vm
   - setup_zabbix
   - setup_GNS3
+  - deploy_app
+  - affirm
+  - deny
+  - stop
+
+
+entities:
+  - repo
+  - name
+  - branch
+  - entrypoint
+  - port
+  - vm_name
 
 responses:
   utter_greet:
     - text: "Hi! How can I help you?"
   utter_setup_zabbix_started:
     - text: "Kicking off Zabbix setup…"
+  utter_ask_repo:
+    - text: "Got it. What is the Git repo URL?"
+  utter_ask_name:
+    - text: "What should I call this service (app_name)?"
+  utter_ask_branch:
+    - text: "Which branch/tag? (default: main)"
+  utter_ask_entrypoint:
+    - text: "What Python entrypoint should I run? (e.g. app.py or '-m flask run ...')"
+  utter_ask_port:
+    - text: "Which port to expose? (0 to skip firewall)"
+  utter_deploy_started:
+    - text: "Deploying {name} from {repo} (branch {branch}) on port {port}. I’ll let you know when it’s done."
 
 actions:
   - action_create_vm
   - action_setup_zabbix
   - action_setup_GNS3
+  - validate_deploy_form
+  - action_launch_deploy
 
 slots:
   vm_name:
@@ -24,6 +51,58 @@ slots:
     mappings:
       - type: from_entity
         entity: vm_name
+  repo:
+    type: text
+    mappings:
+      - type: from_entity
+        entity: repo
+      - type: from_text
+        conditions: [{ active_loop: deploy_form, requested_slot: repo }]
+  name:
+    type: text
+    mappings:
+      - type: from_entity
+        entity: name
+      - type: from_text
+        conditions: [{ active_loop: deploy_form, requested_slot: name }]
+  branch:
+    type: text
+    mappings:
+      - type: from_entity
+        entity: branch
+      - type: from_text
+        conditions: [{ active_loop: deploy_form, requested_slot: branch }]
+  entrypoint:
+    type: text
+    mappings:
+      - type: from_entity
+        entity: entrypoint
+      - type: from_text
+        conditions: [{ active_loop: deploy_form, requested_slot: entrypoint }]
+  port:
+    type: any
+    influence_conversation: false
+    mappings:
+      - type: from_text
+        conditions:
+          - active_loop: deploy_form
+            requested_slot: port
+      - type: from_entity
+        entity: port
+        conditions:
+          - active_loop: deploy_form
+            requested_slot: port
+
+
+forms:
+  deploy_form:
+    required_slots:
+      - repo
+      - name
+      - branch
+      - entrypoint
+      - port
+
 
 session_config:
   session_expiration_time: 60
