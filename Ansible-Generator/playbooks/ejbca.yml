@@ -157,7 +157,7 @@
           ExecStop={{ wildfly_home }}/bin/jboss-cli.sh --connect command=:shutdown
           Type=simple
           Restart=on-failure
-          TimeoutStartSec=60
+          TimeoutStartSec=120
           TimeoutStopSec=60
 
           [Install]
@@ -178,7 +178,7 @@
       ansible.builtin.wait_for:
         host: 127.0.0.1
         port: "{{ wildfly_mgmt_port }}"
-        timeout: 90
+        timeout: 120
 
     # -------------------- Management user --------------------
     - name: Stat mgmt user file
@@ -284,6 +284,55 @@
       changed_when: false
       failed_when: dstest.rc != 0 and ((dstest.stdout | regex_search('success')) is none)
 
+    # -------------------- Ensure HTTP is actually configured -------------------
+    - name: Check if socket-binding 'http' exists
+      ansible.builtin.shell: >
+        {{ wildfly_home }}/bin/jboss-cli.sh -c
+        --controller=127.0.0.1:{{ wildfly_mgmt_port }}
+        --user='{{ mgmt_user }}' --password='{{ mgmt_password }}'
+        "/socket-binding-group=standard-sockets/socket-binding=http:read-resource"
+      args: { executable: /bin/bash }
+      register: http_binding
+      failed_when: false
+      changed_when: false
+
+    - name: Create socket-binding 'http' if missing (port {{ wildfly_http_port }})
+      ansible.builtin.shell: >
+        {{ wildfly_home }}/bin/jboss-cli.sh -c
+        --controller=127.0.0.1:{{ wildfly_mgmt_port }}
+        --user='{{ mgmt_user }}' --password='{{ mgmt_password }}'
+        "/socket-binding-group=standard-sockets/socket-binding=http:add(port={{ wildfly_http_port }},interface=public)"
+      args: { executable: /bin/bash }
+      when: http_binding.rc != 0
+      notify: Restart WildFly
+
+    - name: Check if Undertow http-listener 'default' exists
+      ansible.builtin.shell: >
+        {{ wildfly_home }}/bin/jboss-cli.sh -c
+        --controller=127.0.0.1:{{ wildfly_mgmt_port }}
+        --user='{{ mgmt_user }}' --password='{{ mgmt_password }}'
+        "/subsystem=undertow/server=default-server/http-listener=default:read-resource"
+      args: { executable: /bin/bash }
+      register: http_listener
+      failed_when: false
+      changed_when: false
+
+    - name: Create Undertow http-listener 'default' if missing
+      ansible.builtin.shell: >
+        {{ wildfly_home }}/bin/jboss-cli.sh -c
+        --controller=127.0.0.1:{{ wildfly_mgmt_port }}
+        --user='{{ mgmt_user }}' --password='{{ mgmt_password }}'
+        "/subsystem=undertow/server=default-server/http-listener=default:add(socket-binding=http,enable-http2=true)"
+      args: { executable: /bin/bash }
+      when: http_listener.rc != 0
+      notify: Restart WildFly
+
+    - name: Wait for HTTP port to be up
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: "{{ wildfly_http_port }}"
+        timeout: 120
+
     # -------------------- EJBCA source (archive) --------------------
     - name: Ensure EJBCA root dir exists
       ansible.builtin.file:
@@ -378,41 +427,56 @@
         msg: "ejbca.ear not found at {{ ejbca_root }}/src/dist/ejbca.ear"
       when: not ejbca_ear.stat.exists
 
-    # -------------------- Clean & Deploy via WildFly CLI --------------------
-    - name: Ensure no stale ejbca.ear deployment remains
-      ansible.builtin.shell: >
-        {{ wildfly_home }}/bin/jboss-cli.sh -c
-        --controller=127.0.0.1:{{ wildfly_mgmt_port }}
-        --user='{{ mgmt_user }}' --password='{{ mgmt_password }}'
-        --commands="/deployment=ejbca.ear:remove"
-      args: { executable: /bin/bash }
-      failed_when: false
-      changed_when: false
+    # -------------------- Clean & Deploy via WildFly CLI (with rescue logs) ---
+    - block:
+        - name: Ensure no stale ejbca.ear deployment remains
+          ansible.builtin.shell: >
+            {{ wildfly_home }}/bin/jboss-cli.sh -c
+            --controller=127.0.0.1:{{ wildfly_mgmt_port }}
+            --user='{{ mgmt_user }}' --password='{{ mgmt_password }}'
+            --commands="/deployment=ejbca.ear:remove"
+          args: { executable: /bin/bash }
+          failed_when: false
+          changed_when: false
 
-    - name: Deploy fresh (enabled) with explicit names
-      ansible.builtin.shell: >
-        {{ wildfly_home }}/bin/jboss-cli.sh -c
-        --controller=127.0.0.1:{{ wildfly_mgmt_port }}
-        --user='{{ mgmt_user }}' --password='{{ mgmt_password }}'
-        --commands="deploy {{ ejbca_root }}/src/dist/ejbca.ear --name=ejbca.ear --runtime-name=ejbca.ear"
-      args: { executable: /bin/bash }
+        - name: Deploy fresh (enabled) with explicit names
+          ansible.builtin.shell: >
+            {{ wildfly_home }}/bin/jboss-cli.sh -c
+            --controller=127.0.0.1:{{ wildfly_mgmt_port }}
+            --user='{{ mgmt_user }}' --password='{{ mgmt_password }}'
+            --commands="deploy {{ ejbca_root }}/src/dist/ejbca.ear --name=ejbca.ear --runtime-name=ejbca.ear"
+          args: { executable: /bin/bash }
 
-    - name: Wait until ejbca.ear is ENABLED and OK
-      ansible.builtin.shell: |
-        set -e
-        OUT="$({{ wildfly_home }}/bin/jboss-cli.sh -c \
-          --controller=127.0.0.1:{{ wildfly_mgmt_port }} \
-          --user='{{ mgmt_user }}' --password='{{ mgmt_password }}' \
-          --commands='deployment-info')"
-        echo "$OUT"
-        # Expect a row like: "ejbca.ear  ejbca.ear  true  true  OK"
-        echo "$OUT" | awk '$1=="ejbca.ear" && $4=="true" && $5=="OK"{f=1} END{exit(f?0:1)}'
-      args: { executable: /bin/bash }
-      register: depinfo
-      changed_when: false
-      retries: 20
-      delay: 6
-      until: depinfo.rc == 0
+        - name: Wait until ejbca.ear is ENABLED and OK
+          ansible.builtin.shell: |
+            set -e
+            OUT="$({{ wildfly_home }}/bin/jboss-cli.sh -c \
+              --controller=127.0.0.1:{{ wildfly_mgmt_port }} \
+              --user='{{ mgmt_user }}' --password='{{ mgmt_password }}' \
+              --commands='deployment-info')"
+            echo "$OUT"
+            # Expect: ejbca.ear  ejbca.ear  true  true  OK
+            echo "$OUT" | awk '$1=="ejbca.ear" && $4=="true" && $5=="OK"{f=1} END{exit(f?0:1)}'
+          args: { executable: /bin/bash }
+          register: depinfo
+          changed_when: false
+          retries: 20
+          delay: 6
+          until: depinfo.rc == 0
+
+      rescue:
+        - name: Show last 200 lines of WildFly server.log
+          ansible.builtin.shell: "tail -n 200 {{ wildfly_home }}/standalone/log/server.log"
+          register: srvlog
+          changed_when: false
+
+        - name: Dump server.log to console
+          ansible.builtin.debug:
+            var: srvlog.stdout
+
+        - name: Explicit failure after log dump
+          ansible.builtin.fail:
+            msg: "EJBCA deployment failed. See server.log above."
 
     # -------------------- Optional: datasource health (again) -----------------
     - name: Test EjbcaDS connection (post-deploy)
