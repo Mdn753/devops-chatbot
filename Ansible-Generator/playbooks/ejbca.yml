@@ -343,7 +343,6 @@
         group: "{{ wildfly_group }}"
         mode: "0755"
 
-
     - name: Download EJBCA CE source archive
       ansible.builtin.get_url:
         url: "{{ ejbca_archive_url }}"
@@ -558,7 +557,7 @@
       failed_when: "ssc_cmd.rc != 0 and ('Duplicate resource' not in (ssc_cmd.stdout + ssc_cmd.stderr)) and ('WFLYCTL0212' not in (ssc_cmd.stdout + ssc_cmd.stderr))"
       args: { executable: /bin/bash }
 
-    # ---- Undertow listeners: remove any existing, then add ours cleanly ----
+    # ---- Undertow listeners: remove any existing, RELOAD, then add ours cleanly ----
     - name: Remove default Undertow HTTP listener if present
       ansible.builtin.shell: >
         {{ wildfly_home }}/bin/jboss-cli.sh -c
@@ -602,6 +601,22 @@
       changed_when: "rm_https_named.rc == 0"
       failed_when: false
       args: { executable: /bin/bash }
+
+    # >>> Reload here to free 8080/8443 before adding new listeners <<<
+    - name: Reload WildFly after listener removals
+      ansible.builtin.shell: >
+        {{ wildfly_home }}/bin/jboss-cli.sh -c
+        --controller=127.0.0.1:{{ wildfly_mgmt_port }}
+        --user='{{ mgmt_user }}' --password='{{ mgmt_password }}'
+        --command=":reload"
+      changed_when: true
+      args: { executable: /bin/bash }
+
+    - name: Wait for management port after reload
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: "{{ wildfly_mgmt_port }}"
+        timeout: 120
 
     - name: Add Undertow HTTP listener (redirect to HTTPS)
       ansible.builtin.shell: >
