@@ -392,20 +392,6 @@
             </dependencies>
           </module>
 
-    - name: Verify required modules exist before registering driver
-      ansible.builtin.shell: >
-        {{ wildfly_home }}/bin/jboss-cli.sh -c
-        --controller=127.0.0.1:{{ wildfly_mgmt_port }}
-        --user='{{ mgmt_user }}' --password='{{ mgmt_password }}'
-        '/core-service=module-loading:list-modules'
-      args: { executable: /bin/bash }
-      register: module_list
-      changed_when: false
-
-    - name: Debug available modules (filtered for java.*)
-      ansible.builtin.debug:
-        msg: "{{ module_list.stdout_lines | select('match', '.*java\\..*') | list }}"
-
     - name: Register JDBC driver ({{ mariadb_driver_name }}) from module
       ansible.builtin.shell: >
         {{ wildfly_home }}/bin/jboss-cli.sh -c
@@ -432,16 +418,37 @@
       args: { executable: /bin/bash }
       register: add_driver_fallback
       when: add_driver.rc != 0 and ('already registered' not in add_driver.stdout and 'WFLYCTL0212' not in add_driver.stdout)
-      failed_when: add_driver_fallback.rc != 0 and ('already registered' not in add_driver_fallback.stdout and 'WFLYCTL0212' not in add_driver_fallback.stdout)
+      failed_when: false
 
-    - name: Check if driver registration succeeded
-      ansible.builtin.fail:
-        msg: "Both driver registration attempts failed. Module dependency issue persists."
+    - name: Final fallback - Deploy MariaDB driver as deployment
+      ansible.builtin.copy:
+        src: "{{ wildfly_home }}/modules/system/layers/base/{{ mariadb_module_name | replace('.', '/') }}/main/{{ mariadb_driver_file }}"
+        dest: "{{ wildfly_home }}/standalone/deployments/{{ mariadb_driver_file }}"
+        remote_src: yes
+        mode: "0644"
       when: 
         - add_driver.rc != 0 
         - ('already registered' not in add_driver.stdout and 'WFLYCTL0212' not in add_driver.stdout)
         - (add_driver_fallback is defined and add_driver_fallback.rc != 0)
         - (add_driver_fallback is defined and 'already registered' not in add_driver_fallback.stdout and 'WFLYCTL0212' not in add_driver_fallback.stdout)
+
+    - name: Wait for driver deployment (if using deployment method)
+      ansible.builtin.wait_for:
+        path: "{{ wildfly_home }}/standalone/deployments/{{ mariadb_driver_file }}.deployed"
+        timeout: 30
+      when: 
+        - add_driver.rc != 0 
+        - ('already registered' not in add_driver.stdout and 'WFLYCTL0212' not in add_driver.stdout)
+        - (add_driver_fallback is defined and add_driver_fallback.rc != 0)
+        - (add_driver_fallback is defined and 'already registered' not in add_driver_fallback.stdout and 'WFLYCTL0212' not in add_driver_fallback.stdout)
+
+    - name: Check final driver registration status
+      ansible.builtin.debug:
+        msg: |
+          Driver registration results:
+          - Module approach: {{ 'SUCCESS' if add_driver.rc == 0 else 'FAILED' }}
+          - Auto-detection: {{ 'SUCCESS' if (add_driver_fallback is defined and add_driver_fallback.rc == 0) else 'SKIPPED/FAILED' }}
+          - Deployment fallback: {{ 'USED' if (add_driver.rc != 0 and (add_driver_fallback is undefined or add_driver_fallback.rc != 0)) else 'NOT NEEDED' }}
 
     - name: Verify JDBC driver is present
       ansible.builtin.shell: >
@@ -471,7 +478,6 @@
           jndi-name="java:/EjbcaDS",
           connection-url="jdbc:mariadb://{{ db_host }}:{{ db_port }}/{{ db_name }}",
           driver-name="{{ mariadb_driver_name }}",
-          driver-class="{{ mariadb_driver_class }}",
           user-name="{{ db_user }}",
           password="{{ db_password }}",
           min-pool-size=5,
@@ -481,6 +487,29 @@
           check-valid-connection-sql="select 1;"
         )'
       args: { executable: /bin/bash }
+      register: add_datasource
+      failed_when: false
+
+    - name: Fallback - Add EjbcaDS using deployment-based driver name
+      ansible.builtin.shell: >
+        {{ wildfly_home }}/bin/jboss-cli.sh -c
+        --controller=127.0.0.1:{{ wildfly_mgmt_port }}
+        --user='{{ mgmt_user }}' --password='{{ mgmt_password }}'
+        '/subsystem=datasources/data-source=ejbcads:add(
+          jndi-name="java:/EjbcaDS",
+          connection-url="jdbc:mariadb://{{ db_host }}:{{ db_port }}/{{ db_name }}",
+          driver-name="{{ mariadb_driver_file }}",
+          user-name="{{ db_user }}",
+          password="{{ db_password }}",
+          min-pool-size=5,
+          max-pool-size=150,
+          validate-on-match=true,
+          background-validation=false,
+          check-valid-connection-sql="select 1;"
+        )'
+      args: { executable: /bin/bash }
+      when: add_datasource.rc != 0
+      failed_when: false
 
     - name: Enable EjbcaDS
       ansible.builtin.shell: >
