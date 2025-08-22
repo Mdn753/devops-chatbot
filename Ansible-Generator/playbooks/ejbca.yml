@@ -1,5 +1,5 @@
 ---
-- name: EJBCA CE on Ubuntu (WildFly 32 via Galleon + MariaDB; driver deployed, robust CLI)
+- name: EJBCA CE on Ubuntu (WildFly 32 via Galleon + MariaDB; driver deploy + robust CLI)
   hosts: ejbca
   become: yes
   gather_facts: yes
@@ -33,7 +33,7 @@
 
     # MariaDB JDBC driver (deploy as JAR so driver-name = filename)
     mariadb_driver_version: "3.4.1"
-    mariadb_driver_url: "https://dlm.mariadb.com/3852266/Connectors/java/connector-java-{{ mariadb_driver_version }}/mariadb-java-client-{{ mariadb_driver_version }}.jar"
+    mariadb_driver_url: "https://repo1.maven.org/maven2/org/mariadb/jdbc/mariadb-java-client/{{ mariadb_driver_version }}/mariadb-java-client-{{ mariadb_driver_version }}.jar"
     mariadb_driver_jar: "mariadb-java-client.jar"   # generic name on disk
     mariadb_driver_class: "org.mariadb.jdbc.Driver"
 
@@ -355,7 +355,7 @@
         port: "{{ wildfly_mgmt_port }}"
         timeout: 150
 
-    # -------------------- JDBC driver (deploy, not module) --------------------
+    # -------------------- JDBC driver (deploy, then ensure resource exists) ---
     - name: Ensure deployments dir exists
       ansible.builtin.file:
         path: "{{ wildfly_home }}/standalone/deployments"
@@ -381,17 +381,65 @@
         path: "{{ wildfly_home }}/standalone/deployments/{{ mariadb_driver_jar }}.deployed"
         timeout: 180
 
-    # Check that driver is visible under the datasources subsystem
-    - name: Verify MariaDB driver is registered (driver-name == filename)
+    - name: List installed JDBC drivers (for visibility)
+      ansible.builtin.shell: >
+        {{ wildfly_home }}/bin/jboss-cli.sh -c
+        --controller=127.0.0.1:{{ wildfly_mgmt_port }}
+        --user='{{ mgmt_user }}' --password='{{ mgmt_password }}'
+        '/subsystem=datasources:installed-drivers-list'
+      args: { executable: /bin/bash }
+      register: installed_drivers
+      changed_when: false
+
+    - name: Try to read deployed driver by filename ({{ mariadb_driver_jar }})
       ansible.builtin.shell: >
         {{ wildfly_home }}/bin/jboss-cli.sh -c
         --controller=127.0.0.1:{{ wildfly_mgmt_port }}
         --user='{{ mgmt_user }}' --password='{{ mgmt_password }}'
         '/subsystem=datasources/jdbc-driver={{ mariadb_driver_jar }}:read-resource'
       args: { executable: /bin/bash }
-      register: driver_check
-      failed_when: driver_check.rc != 0
+      register: driver_rr
       changed_when: false
+      failed_when: false
+
+    - name: Manually register JDBC driver backed by the deployment JAR (if missing)
+      ansible.builtin.shell: >
+        {{ wildfly_home }}/bin/jboss-cli.sh -c
+        --controller=127.0.0.1:{{ wildfly_mgmt_port }}
+        --user='{{ mgmt_user }}' --password='{{ mgmt_password }}'
+        '/subsystem=datasources/jdbc-driver={{ mariadb_driver_jar }}:add(
+          driver-name="{{ mariadb_driver_jar }}",
+          deployment-name="{{ mariadb_driver_jar }}",
+          driver-class-name="{{ mariadb_driver_class }}"
+        )'
+      args: { executable: /bin/bash }
+      when: driver_rr.rc != 0
+      register: add_driver
+      failed_when: add_driver.rc != 0 and ('already registered' not in add_driver.stdout)
+
+    - name: Reload WildFly (after driver registration)
+      ansible.builtin.shell: >
+        {{ wildfly_home }}/bin/jboss-cli.sh -c
+        --controller=127.0.0.1:{{ wildfly_mgmt_port }}
+        --user='{{ mgmt_user }}' --password='{{ mgmt_password }}'
+        ':reload'
+      args: { executable: /bin/bash }
+      when: driver_rr.rc != 0
+
+    - name: Wait for management port after reload (driver registration)
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: "{{ wildfly_mgmt_port }}"
+        timeout: 150
+      when: driver_rr.rc != 0
+
+    - name: Verify MariaDB driver resource now exists
+      ansible.builtin.shell: >
+        {{ wildfly_home }}/bin/jboss-cli.sh -c
+        --controller=127.0.0.1:{{ wildfly_mgmt_port }}
+        --user='{{ mgmt_user }}' --password='{{ mgmt_password }}'
+        '/subsystem=datasources/jdbc-driver={{ mariadb_driver_jar }}:read-resource'
+      args: { executable: /bin/bash }
 
     # -------------------- Datasource (add/enable/test) --------------------
     - name: Remove old EjbcaDS if present (ignore if missing)
