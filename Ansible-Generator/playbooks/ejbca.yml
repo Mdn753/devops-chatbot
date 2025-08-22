@@ -1261,7 +1261,7 @@
       changed_when: "'Deployed' in raweb.stdout"
       failed_when: false
 
-    # -------------------- Firewall (optional) --------------------
+   # -------------------- Firewall (optional) --------------------
     - name: Ensure UFW allows 8080/8443
       ansible.builtin.ufw:
         rule: allow
@@ -1270,20 +1270,6 @@
       loop:
         - "{{ wildfly_http_port }}"
         - "{{ wildfly_https_port }}"
-      when: ufw_enable
-
-
-  handlers:
-    - name: Restart WildFly
-      ansible.builtin.service:
-        name: wildfly
-        state: restarted
-
-      ansible.builtin.ufw:
-        rule: allow
-        port: "{{ item }}"
-        proto: tcp
-      loop: ["{{ wildfly_http_port }}", "{{ wildfly_https_port }}"]
       when: ufw_enable
 
   handlers:
