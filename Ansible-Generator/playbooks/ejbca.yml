@@ -154,7 +154,7 @@
       args:
         executable: /bin/bash
 
-    # --- Remove RESTEasy-Crypto to avoid BC conflicts (best practice for EJBCA) ---
+    # --- Remove RESTEasy-Crypto to avoid BC conflicts ---
     - name: Remove resteasy-crypto module reference in jaxrs module.xml if present
       ansible.builtin.replace:
         path: "{{ wildfly_home }}/modules/system/layers/base/org/jboss/as/jaxrs/main/module.xml"
@@ -251,7 +251,7 @@
         line: "{{ mgmt_user }}=SuperUser"
         create: yes
 
-    # -------------------- Ensure HTTP is configured (socket + listener) --------
+    # -------------------- Ensure HTTP configured (socket + listener) ----------
     - name: Check if socket-binding 'http' exists
       ansible.builtin.shell: >
         {{ wildfly_home }}/bin/jboss-cli.sh -c
@@ -300,22 +300,7 @@
         port: "{{ wildfly_http_port }}"
         timeout: 120
 
-    # -------------------- JDBC driver (generic filename) ----------------------
-    - name: Ensure deployments dir exists
-      ansible.builtin.file:
-        path: "{{ wildfly_home }}/standalone/deployments"
-        state: directory
-        owner: "{{ wildfly_user }}"
-        group: "{{ wildfly_group }}"
-        mode: "0755"
-
-    - name: Download MariaDB JDBC driver into deployments (generic name)
-      ansible.builtin.get_url:
-        url: "{{ mariadb_driver_url }}"
-        dest: "{{ wildfly_home }}/standalone/deployments/{{ mariadb_driver_jar }}"
-        mode: "0644"
-
-    # -------------------- Datasource (ensure subsystem, then DMR add) ---------
+    # -------------------- Ensure datasources extension/subsystem --------------
     - name: Check connector extension (org.jboss.as.connector)
       ansible.builtin.shell: >
         {{ wildfly_home }}/bin/jboss-cli.sh -c
@@ -356,6 +341,47 @@
       args: { executable: /bin/bash }
       when: ds_subsys.rc != 0
 
+    - name: Reload WildFly to apply any pending changes
+      ansible.builtin.shell: >
+        {{ wildfly_home }}/bin/jboss-cli.sh -c
+        --controller=127.0.0.1:{{ wildfly_mgmt_port }}
+        --user='{{ mgmt_user }}' --password='{{ mgmt_password }}'
+        ':reload'
+      args: { executable: /bin/bash }
+
+    - name: Wait for management port after reload
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: "{{ wildfly_mgmt_port }}"
+        timeout: 150
+
+    # -------------------- JDBC driver (generic filename) ----------------------
+    - name: Ensure deployments dir exists
+      ansible.builtin.file:
+        path: "{{ wildfly_home }}/standalone/deployments"
+        state: directory
+        owner: "{{ wildfly_user }}"
+        group: "{{ wildfly_group }}"
+        mode: "0755"
+
+    - name: Place MariaDB JDBC driver into deployments (generic name)
+      ansible.builtin.get_url:
+        url: "{{ mariadb_driver_url }}"
+        dest: "{{ wildfly_home }}/standalone/deployments/{{ mariadb_driver_jar }}"
+        mode: "0644"
+
+    - name: Trigger deployment scanner for JDBC driver
+      ansible.builtin.file:
+        path: "{{ wildfly_home }}/standalone/deployments/{{ mariadb_driver_jar }}.dodeploy"
+        state: touch
+        mode: "0644"
+
+    - name: Wait until JDBC driver is deployed (.deployed marker)
+      ansible.builtin.wait_for:
+        path: "{{ wildfly_home }}/standalone/deployments/{{ mariadb_driver_jar }}.deployed"
+        timeout: 180
+
+    # (Now the driver should be registered by the datasources subsystem)
     - name: Wait until MariaDB driver is registered by WildFly
       ansible.builtin.shell: >
         {{ wildfly_home }}/bin/jboss-cli.sh -c
@@ -369,6 +395,7 @@
       until: driver_check.rc == 0
       changed_when: false
 
+    # -------------------- Datasource (DMR add/enable/test) --------------------
     - name: Remove old EjbcaDS if present (ignore if missing)
       ansible.builtin.shell: >
         {{ wildfly_home }}/bin/jboss-cli.sh -c
