@@ -337,7 +337,7 @@
 
     - name: Recreate EJBCA src dir
       ansible.builtin.file:
-        path: "{{ ejbca_root }}/src"
+        path: "{{ ejbca_root }}/src}"
         state: directory
         owner: "{{ wildfly_user }}"
         group: "{{ wildfly_group }}"
@@ -414,7 +414,7 @@
     - name: Fail if EAR not built
       ansible.builtin.fail:
         msg: "ejbca.ear not found at {{ ejbca_root }}/src/dist/ejbca.ear"
-        when: not ejbca_ear.stat.exists
+      when: not ejbca_ear.stat.exists
 
     # -------------------- Clean & Deploy via WildFly CLI --------------------
     - name: Ensure no stale ejbca.ear deployment remains
