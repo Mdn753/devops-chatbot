@@ -360,7 +360,7 @@
         dest: "{{ wildfly_home }}/modules/system/layers/base/{{ mariadb_module_name | replace('.', '/') }}/main/{{ mariadb_driver_file }}"
         mode: "0644"
 
-    - name: Write module.xml for {{ mariadb_module_name }} (with java.se dependency)
+    - name: Write module.xml for {{ mariadb_module_name }} (with correct JDBC dependencies)
       ansible.builtin.copy:
         dest: "{{ wildfly_home }}/modules/system/layers/base/{{ mariadb_module_name | replace('.', '/') }}/main/module.xml"
         mode: "0644"
@@ -371,8 +371,12 @@
               <resource-root path="{{ mariadb_driver_file }}"/>
             </resources>
             <dependencies>
-              <!-- Ensures java/sql/Driver is available -->
-              <module name="java.se"/>
+              <!-- Required for JDBC drivers -->
+              <module name="java.sql"/>
+              <module name="java.logging"/>
+              <module name="java.xml"/>
+              <!-- Transaction API for XA support -->
+              <module name="javax.api"/>
             </dependencies>
           </module>
 
@@ -632,19 +636,4 @@
       changed_when: "'Deployed' in raweb.stdout"
       failed_when: false
 
-    # -------------------- Firewall (optional) --------------------
-    - name: Ensure UFW allows 8080/8443
-      ansible.builtin.ufw:
-        rule: allow
-        port: "{{ item }}"
-        proto: tcp
-      loop:
-        - "{{ wildfly_http_port }}"
-        - "{{ wildfly_https_port }}"
-      when: ufw_enable
-
-  handlers:
-    - name: Restart WildFly
-      ansible.builtin.service:
-        name: wildfly
-        state: restarted
+    # -------------------- Firewall (optional)
