@@ -49,11 +49,10 @@
     wf_keystore_dir: "/opt/wildfly/standalone/configuration/keystore"
     wf_keystore_file: "{{ wf_keystore_dir }}/keystore.p12"
     wf_keystore_alias: "wildfly"
-    wf_keystore_pass: "serverpwd"         # testing only; store securely later
+    wf_keystore_pass: "serverpwd"   # testing only; store securely later
 
     # ===== EJBCA settings =====
-    # allow healthcheck from localhost + any (adjust for production)
-    healthcheck_authorizedips: "127.0.0.1;ANY"
+    healthcheck_authorizedips: "127.0.0.1;ANY"  # adjust for production
 
     # ===== Firewall (optional) =====
     ufw_enable: false
@@ -444,7 +443,6 @@
           --user='{{ mgmt_user }}' --password='{{ mgmt_password }}' \
           --commands='deployment-info')"
         echo "$OUT"
-        # Expect a row like: "ejbca.ear  ejbca.ear  true  true  OK"
         echo "$OUT" | awk '$1=="ejbca.ear" && $4=="true" && $5=="OK"{f=1} END{exit(f?0:1)}'
       args: { executable: /bin/bash }
       register: depinfo
@@ -454,11 +452,13 @@
       until: depinfo.rc == 0
 
     # -------------------- Enable HTTPS listener on WildFly (Elytron/Undertow) ---
-    - name: Create keystore dir
+    - name: Create keystore dir (owned by wildfly)
       ansible.builtin.file:
         path: "{{ wf_keystore_dir }}"
         state: directory
-        mode: "0755"
+        owner: "{{ wildfly_user }}"
+        group: "{{ wildfly_group }}"
+        mode: "0750"
 
     - name: Generate self-signed TLS cert & PKCS12 keystore (testing)
       ansible.builtin.shell: |
@@ -476,7 +476,19 @@
         fi
       args: { executable: /bin/bash }
 
-    # >>>>> Fixed: idempotent CLI adds (no 'then' syntax), ignore duplicates
+    - name: Ensure keystore files owned by wildfly and readable
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        owner: "{{ wildfly_user }}"
+        group: "{{ wildfly_group }}"
+        mode: "{{ item.mode }}"
+      loop:
+        - { path: "{{ wf_keystore_dir }}",            mode: "0750" }
+        - { path: "{{ wf_keystore_file }}",           mode: "0640" }
+        - { path: "{{ wf_keystore_dir }}/server.crt", mode: "0644" }
+        - { path: "{{ wf_keystore_dir }}/server.key", mode: "0640" }
+
+    # Idempotent CLI adds (ignore duplicates / WFLYCTL0212)
     - name: Ensure HTTP/HTTPS interfaces exist
       ansible.builtin.shell: >
         {{ wildfly_home }}/bin/jboss-cli.sh -c
