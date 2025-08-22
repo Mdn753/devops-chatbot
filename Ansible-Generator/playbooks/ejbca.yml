@@ -1267,8 +1267,11 @@
         rule: allow
         port: "{{ item }}"
         proto: tcp
-      loop: ["{{ wildfly_http_port }}", "{{ wildfly_https_port }}"]
+      loop:
+        - "{{ wildfly_http_port }}"
+        - "{{ wildfly_https_port }}"
       when: ufw_enable
+
 
   handlers:
     - name: Restart WildFly
