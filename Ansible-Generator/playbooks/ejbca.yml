@@ -10,7 +10,7 @@
   vars:
     # ===== Versions & Paths =====
     java_pkg: openjdk-17-jdk
-    wildfly_version: "32.0.0.Final"         # WildFly 32.x for EJBCA 9.x
+    wildfly_version: "32.0.0.Final"         # WildFly 32.x suits EJBCA 9.x
     galleon_version: "6.0.0.Final"
     wildfly_dir: "/opt/wildfly-{{ wildfly_version }}"
     wildfly_home: "/opt/wildfly"            # symlink to current
@@ -368,8 +368,26 @@
             <resources>
               <resource-root path="{{ mariadb_driver_file }}"/>
             </resources>
-            <dependencies/>
+            <dependencies>
+              <module name="java.se"/>
+              <module name="jakarta.transaction.api" optional="true"/>
+              <module name="org.jboss.logging" optional="true"/>
+            </dependencies>
           </module>
+
+    - name: Reload WildFly to pick up new driver module
+      ansible.builtin.shell: >
+        {{ wildfly_home }}/bin/jboss-cli.sh -c
+        --controller=127.0.0.1:{{ wildfly_mgmt_port }}
+        --user='{{ mgmt_user }}' --password='{{ mgmt_password }}'
+        ':reload'
+      args: { executable: /bin/bash }
+
+    - name: Wait for management port after reload (driver module)
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: "{{ wildfly_mgmt_port }}"
+        timeout: 150
 
     - name: Register JDBC driver ({{ mariadb_driver_name }}) from module
       ansible.builtin.shell: >
@@ -531,7 +549,7 @@
     - name: Fail if EAR not built
       ansible.builtin.fail:
         msg: "ejbca.ear not found at {{ ejbca_root }}/src/dist/ejbca.ear"
-        when: not ejbca_ear.stat.exists
+      when: not ejbca_ear.stat.exists
 
     # -------------------- Clean & Deploy via WildFly CLI (with rescue logs) ---
     - block:
@@ -561,7 +579,6 @@
               --user='{{ mgmt_user }}' --password='{{ mgmt_password }}' \
               --commands='deployment-info')"
             echo "$OUT"
-            # Expect: ejbca.ear  ejbca.ear  true  true  OK
             echo "$OUT" | awk '$1=="ejbca.ear" && $4=="true" && $5=="OK"{f=1} END{exit(f?0:1)}'
           args: { executable: /bin/bash }
           register: depinfo
