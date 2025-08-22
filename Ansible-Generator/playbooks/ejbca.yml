@@ -414,7 +414,7 @@
     - name: Fail if EAR not built
       ansible.builtin.fail:
         msg: "ejbca.ear not found at {{ ejbca_root }}/src/dist/ejbca.ear"
-      when: not ejbca_ear.stat.exists
+        when: not ejbca_ear.stat.exists
 
     # -------------------- Clean & Deploy via WildFly CLI --------------------
     - name: Ensure no stale ejbca.ear deployment remains
@@ -488,7 +488,6 @@
         - { path: "{{ wf_keystore_dir }}/server.crt", mode: "0644" }
         - { path: "{{ wf_keystore_dir }}/server.key", mode: "0640" }
 
-    # Idempotent CLI adds (ignore duplicates / WFLYCTL0212)
     - name: Ensure HTTP/HTTPS interfaces exist
       ansible.builtin.shell: >
         {{ wildfly_home }}/bin/jboss-cli.sh -c
@@ -547,7 +546,6 @@
       failed_when: "km_cmd.rc != 0 and ('Duplicate resource' not in (km_cmd.stdout + km_cmd.stderr)) and ('WFLYCTL0212' not in (km_cmd.stdout + km_cmd.stderr))"
       args: { executable: /bin/bash }
 
-
     - name: Ensure Elytron server SSL context exists
       ansible.builtin.shell: >
         {{ wildfly_home }}/bin/jboss-cli.sh -c
@@ -559,29 +557,74 @@
       failed_when: "ssc_cmd.rc != 0 and ('Duplicate resource' not in (ssc_cmd.stdout + ssc_cmd.stderr)) and ('WFLYCTL0212' not in (ssc_cmd.stdout + ssc_cmd.stderr))"
       args: { executable: /bin/bash }
 
-    - name: Ensure Undertow HTTP listener exists (redirect to HTTPS)
+    # ---- Undertow listeners: remove any existing, then add ours cleanly ----
+    - name: Remove default Undertow HTTP listener if present
+      ansible.builtin.shell: >
+        {{ wildfly_home }}/bin/jboss-cli.sh -c
+        --controller=127.0.0.1:{{ wildfly_mgmt_port }}
+        --user='{{ mgmt_user }}' --password='{{ mgmt_password }}'
+        --command="/subsystem=undertow/server=default-server/http-listener=default:remove"
+      register: rm_http_default
+      changed_when: "rm_http_default.rc == 0"
+      failed_when: false
+      args: { executable: /bin/bash }
+
+    - name: Remove Undertow HTTP listener named 'http' if present
+      ansible.builtin.shell: >
+        {{ wildfly_home }}/bin/jboss-cli.sh -c
+        --controller=127.0.0.1:{{ wildfly_mgmt_port }}
+        --user='{{ mgmt_user }}' --password='{{ mgmt_password }}'
+        --command="/subsystem=undertow/server=default-server/http-listener=http:remove"
+      register: rm_http_named
+      changed_when: "rm_http_named.rc == 0"
+      failed_when: false
+      args: { executable: /bin/bash }
+
+    - name: Remove default Undertow HTTPS listener if present
+      ansible.builtin.shell: >
+        {{ wildfly_home }}/bin/jboss-cli.sh -c
+        --controller=127.0.0.1:{{ wildfly_mgmt_port }}
+        --user='{{ mgmt_user }}' --password='{{ mgmt_password }}'
+        --command="/subsystem=undertow/server=default-server/https-listener=default:remove"
+      register: rm_https_default
+      changed_when: "rm_https_default.rc == 0"
+      failed_when: false
+      args: { executable: /bin/bash }
+
+    - name: Remove Undertow HTTPS listener named 'https' if present
+      ansible.builtin.shell: >
+        {{ wildfly_home }}/bin/jboss-cli.sh -c
+        --controller=127.0.0.1:{{ wildfly_mgmt_port }}
+        --user='{{ mgmt_user }}' --password='{{ mgmt_password }}'
+        --command="/subsystem=undertow/server=default-server/https-listener=https:remove"
+      register: rm_https_named
+      changed_when: "rm_https_named.rc == 0"
+      failed_when: false
+      args: { executable: /bin/bash }
+
+    - name: Add Undertow HTTP listener (redirect to HTTPS)
       ansible.builtin.shell: >
         {{ wildfly_home }}/bin/jboss-cli.sh -c
         --controller=127.0.0.1:{{ wildfly_mgmt_port }}
         --user='{{ mgmt_user }}' --password='{{ mgmt_password }}'
         --command="/subsystem=undertow/server=default-server/http-listener=http:add(socket-binding=http, redirect-socket=https)"
-      register: u_http_cmd
-      changed_when: "u_http_cmd.rc == 0"
-      failed_when: "u_http_cmd.rc != 0 and ('Duplicate resource' not in (u_http_cmd.stdout + u_http_cmd.stderr)) and ('WFLYCTL0212' not in (u_http_cmd.stdout + u_http_cmd.stderr))"
+      register: u_http_add
+      changed_when: "u_http_add.rc == 0"
+      failed_when: "u_http_add.rc != 0 and ('Duplicate resource' not in (u_http_add.stdout + u_http_add.stderr)) and ('WFLYCTL0212' not in (u_http_add.stdout + u_http_add.stderr))"
       args: { executable: /bin/bash }
 
-    - name: Ensure Undertow HTTPS listener exists
+    - name: Add Undertow HTTPS listener
       ansible.builtin.shell: >
         {{ wildfly_home }}/bin/jboss-cli.sh -c
         --controller=127.0.0.1:{{ wildfly_mgmt_port }}
         --user='{{ mgmt_user }}' --password='{{ mgmt_password }}'
         --command="/subsystem=undertow/server=default-server/https-listener=https:add(socket-binding=https, ssl-context=httpsSSC)"
-      register: u_https_cmd
-      changed_when: "u_https_cmd.rc == 0"
-      failed_when: "u_https_cmd.rc != 0 and ('Duplicate resource' not in (u_https_cmd.stdout + u_https_cmd.stderr)) and ('WFLYCTL0212' not in (u_https_cmd.stdout + u_https_cmd.stderr))"
+      register: u_https_add
+      changed_when: "u_https_add.rc == 0"
+      failed_when: "u_https_add.rc != 0 and ('Duplicate resource' not in (u_https_add.stdout + u_https_add.stderr)) and ('WFLYCTL0212' not in (u_https_add.stdout + u_https_add.stderr))"
       args: { executable: /bin/bash }
 
-    - name: Reload WildFly to apply HTTPS
+    - name: Reload WildFly to apply HTTPS/Undertow changes
       ansible.builtin.shell: >
         {{ wildfly_home }}/bin/jboss-cli.sh -c
         --controller=127.0.0.1:{{ wildfly_mgmt_port }}
