@@ -12,7 +12,6 @@
     java_pkg: openjdk-17-jdk
 
     wildfly_version: "36.0.1.Final"
-    # Pull from Maven Central (reliable in proxied envs)
     wildfly_tarball: "wildfly-dist-{{ wildfly_version }}.tar.gz"
     wildfly_url: "https://repo1.maven.org/maven2/org/wildfly/wildfly-dist/{{ wildfly_version }}/{{ wildfly_tarball }}"
 
@@ -215,7 +214,20 @@
       ansible.builtin.wait_for:
         host: 127.0.0.1
         port: "{{ wildfly_mgmt_port }}"
-        timeout: 120
+        timeout: 300
+
+    - name: Wait until WildFly server-state is 'running' (initial boot)
+      ansible.builtin.shell: >
+        {{ wildfly_home }}/bin/jboss-cli.sh -c
+        --controller=127.0.0.1:{{ wildfly_mgmt_port }}
+        --user='{{ mgmt_user }}' --password='{{ mgmt_password }}'
+        --commands=":read-attribute(name=server-state)"
+      register: server_state_boot
+      changed_when: false
+      retries: 30
+      delay: 5
+      until: server_state_boot.stdout is search("running")
+      args: { executable: /bin/bash }
 
     # -------------------- Management user --------------------
     - name: Stat mgmt user file
@@ -557,7 +569,7 @@
       failed_when: "ssc_cmd.rc != 0 and ('Duplicate resource' not in (ssc_cmd.stdout + ssc_cmd.stderr)) and ('WFLYCTL0212' not in (ssc_cmd.stdout + ssc_cmd.stderr))"
       args: { executable: /bin/bash }
 
-    # ---- Undertow listeners: remove any existing, RELOAD, then add ours cleanly ----
+    # ---- Undertow listeners: remove any existing, RELOAD, wait running, then add ----
     - name: Remove default Undertow HTTP listener if present
       ansible.builtin.shell: >
         {{ wildfly_home }}/bin/jboss-cli.sh -c
@@ -602,7 +614,6 @@
       failed_when: false
       args: { executable: /bin/bash }
 
-    # >>> Reload here to free 8080/8443 before adding new listeners <<<
     - name: Reload WildFly after listener removals
       ansible.builtin.shell: >
         {{ wildfly_home }}/bin/jboss-cli.sh -c
@@ -616,7 +627,20 @@
       ansible.builtin.wait_for:
         host: 127.0.0.1
         port: "{{ wildfly_mgmt_port }}"
-        timeout: 120
+        timeout: 300
+
+    - name: Wait until WildFly server-state is 'running' (post-removal reload)
+      ansible.builtin.shell: >
+        {{ wildfly_home }}/bin/jboss-cli.sh -c
+        --controller=127.0.0.1:{{ wildfly_mgmt_port }}
+        --user='{{ mgmt_user }}' --password='{{ mgmt_password }}'
+        --commands=":read-attribute(name=server-state)"
+      register: server_state_after_rm
+      changed_when: false
+      retries: 30
+      delay: 5
+      until: server_state_after_rm.stdout is search("running")
+      args: { executable: /bin/bash }
 
     - name: Add Undertow HTTP listener (redirect to HTTPS)
       ansible.builtin.shell: >
@@ -649,11 +673,30 @@
       changed_when: true
       args: { executable: /bin/bash }
 
+    - name: Wait for management port after final reload
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: "{{ wildfly_mgmt_port }}"
+        timeout: 300
+
+    - name: Wait until WildFly server-state is 'running' (final)
+      ansible.builtin.shell: >
+        {{ wildfly_home }}/bin/jboss-cli.sh -c
+        --controller=127.0.0.1:{{ wildfly_mgmt_port }}
+        --user='{{ mgmt_user }}' --password='{{ mgmt_password }}'
+        --commands=":read-attribute(name=server-state)"
+      register: server_state_final
+      changed_when: false
+      retries: 30
+      delay: 5
+      until: server_state_final.stdout is search("running")
+      args: { executable: /bin/bash }
+
     - name: Wait for HTTPS to listen
       ansible.builtin.wait_for:
         host: 127.0.0.1
         port: "{{ wildfly_https_port }}"
-        timeout: 90
+        timeout: 120
 
     # -------------------- Optional: datasource health (again) -----------------
     - name: Test EjbcaDS connection (post-deploy)
