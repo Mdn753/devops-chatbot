@@ -1,5 +1,5 @@
 ---
-- name: Native install of EJBCA CE on Ubuntu (WildFly 36 + MariaDB, robust CLI deploy + HTTPS, fast download)
+- name: Native install of EJBCA CE on Ubuntu (WildFly 36 + MariaDB, robust CLI deploy)
   hosts: ejbca
   become: yes
   gather_facts: yes
@@ -12,8 +12,8 @@
     java_pkg: openjdk-17-jdk
 
     wildfly_version: "36.0.1.Final"
-    wildfly_tarball: "wildfly-dist-{{ wildfly_version }}.tar.gz"
-    wildfly_url: "https://repo1.maven.org/maven2/org/wildfly/wildfly-dist/{{ wildfly_version }}/{{ wildfly_tarball }}"
+    wildfly_tarball: "wildfly-{{ wildfly_version }}.tar.gz"
+    wildfly_url: "https://github.com/wildfly/wildfly/releases/download/{{ wildfly_version }}/{{ wildfly_tarball }}"
 
     wildfly_user: "wildfly"
     wildfly_group: "wildfly"
@@ -32,7 +32,7 @@
     ejbca_ref: "main"
     ejbca_archive_url: "https://codeload.github.com/Keyfactor/ejbca-ce/tar.gz/refs/heads/{{ ejbca_ref }}"
 
-    # MariaDB JDBC driver
+    # MariaDB JDBC driver (deploy as a JAR; driver-name equals JAR name)
     mariadb_driver_version: "3.4.1"
     mariadb_driver_url: "https://repo1.maven.org/maven2/org/mariadb/jdbc/mariadb-java-client/{{ mariadb_driver_version }}/mariadb-java-client-{{ mariadb_driver_version }}.jar"
     mariadb_driver_jar: "mariadb-java-client-{{ mariadb_driver_version }}.jar"
@@ -43,15 +43,6 @@
     db_password: "ChangeMeStrong!"
     db_host: "127.0.0.1"
     db_port: 3306
-
-    # ===== HTTPS (WildFly) =====
-    wf_keystore_dir: "/opt/wildfly/standalone/configuration/keystore"
-    wf_keystore_file: "{{ wf_keystore_dir }}/keystore.p12"
-    wf_keystore_alias: "wildfly"
-    wf_keystore_pass: "serverpwd"   # testing only
-
-    # ===== EJBCA settings =====
-    healthcheck_authorizedips: "127.0.0.1;ANY"
 
     # ===== Firewall (optional) =====
     ufw_enable: false
@@ -64,11 +55,10 @@
 
   tasks:
     # -------------------- Base packages --------------------
-    - name: Install base packages (Java, tools, DB server, aria2)
+    - name: Install base packages (Java, tools, DB server)
       ansible.builtin.apt:
         name:
           - "{{ java_pkg }}"
-          - ca-certificates
           - unzip
           - curl
           - wget
@@ -77,11 +67,6 @@
           - python3-pip
           - mariadb-server
           - python3-pymysql
-          - tar
-          - xz-utils
-          - gzip
-          - openssl
-          - aria2
         state: present
         update_cache: yes
 
@@ -122,37 +107,16 @@
         shell: /usr/sbin/nologin
         system: yes
 
-    # Fast, resumable download with aria2c and checksum verification
-    - name: Remove any stale WildFly tarball
-      ansible.builtin.file:
-        path: "/tmp/{{ wildfly_tarball }}"
-        state: absent
-
-    - name: Fetch official SHA-1 for WildFly build (Maven Central)
-      ansible.builtin.uri:
-        url: "{{ wildfly_url }}.sha1"
-        return_content: true
-        status_code: 200
-      register: wf_sha1_resp
+    - name: Download WildFly tarball (GitHub Releases)
+      ansible.builtin.get_url:
+        url: "{{ wildfly_url }}"
+        dest: "/tmp/{{ wildfly_tarball }}"
+        mode: "0644"
+        timeout: 120
+      register: wildfly_dl
       retries: 3
       delay: 5
-      until: wf_sha1_resp.status == 200
-
-    - name: Parse SHA-1 value
-      ansible.builtin.set_fact:
-        wildfly_sha1_expected: "{{ (wf_sha1_resp.content | trim).split()[0] }}"
-
-    - name: Download WildFly with aria2c (multi-conn, resumable, checksum)
-      ansible.builtin.shell: >
-        aria2c -x16 -s16 --file-allocation=none
-        --dir=/tmp --out={{ wildfly_tarball }}
-        --checksum=sha-1={{ wildfly_sha1_expected }}
-        "{{ wildfly_url }}"
-      args: { executable: /bin/bash }
-      register: aria2_out
-      retries: 3
-      delay: 10
-      until: aria2_out.rc == 0
+      until: wildfly_dl is succeeded
 
     - name: Extract WildFly under /opt
       ansible.builtin.unarchive:
@@ -214,20 +178,7 @@
       ansible.builtin.wait_for:
         host: 127.0.0.1
         port: "{{ wildfly_mgmt_port }}"
-        timeout: 300
-
-    - name: Wait until WildFly server-state is 'running' (initial boot)
-      ansible.builtin.shell: >
-        {{ wildfly_home }}/bin/jboss-cli.sh -c
-        --controller=127.0.0.1:{{ wildfly_mgmt_port }}
-        --user='{{ mgmt_user }}' --password='{{ mgmt_password }}'
-        --commands=":read-attribute(name=server-state)"
-      register: server_state_boot
-      changed_when: false
-      retries: 30
-      delay: 5
-      until: server_state_boot.stdout is search("running")
-      args: { executable: /bin/bash }
+        timeout: 90
 
     # -------------------- Management user --------------------
     - name: Stat mgmt user file
@@ -267,7 +218,7 @@
         line: "{{ mgmt_user }}=SuperUser"
         create: yes
 
-    # -------------------- JDBC driver + datasource --------------------
+    # -------------------- JDBC driver --------------------
     - name: Ensure deployments dir exists
       ansible.builtin.file:
         path: "{{ wildfly_home }}/standalone/deployments"
@@ -282,6 +233,7 @@
         dest: "{{ wildfly_home }}/standalone/deployments/{{ mariadb_driver_jar }}"
         mode: "0644"
 
+    # -------------------- Datasource (remove → add → enable → test) ------------
     - name: Remove old EjbcaDS if present (ignore if missing)
       ansible.builtin.shell: >
         {{ wildfly_home }}/bin/jboss-cli.sh -c
@@ -332,242 +284,7 @@
       changed_when: false
       failed_when: dstest.rc != 0 and ((dstest.stdout | regex_search('success')) is none)
 
-    # -------------------- HTTPS/Elytron + Undertow (BEFORE deploy!) --------------------
-    - name: Create keystore dir (owned by wildfly)
-      ansible.builtin.file:
-        path: "{{ wf_keystore_dir }}"
-        state: directory
-        owner: "{{ wildfly_user }}"
-        group: "{{ wildfly_group }}"
-        mode: "0750"
-
-    - name: Generate self-signed TLS cert & PKCS12 keystore (testing)
-      ansible.builtin.shell: |
-        set -e
-        cd "{{ wf_keystore_dir }}"
-        if [ ! -f server.crt ] || [ ! -f server.key ]; then
-          openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
-            -subj "/CN={{ ansible_fqdn | default(inventory_hostname) }}" \
-            -keyout server.key -out server.crt
-        fi
-        if [ ! -f "{{ wf_keystore_file }}" ]; then
-          openssl pkcs12 -export -in server.crt -inkey server.key \
-            -out "{{ wf_keystore_file }}" -name "{{ wf_keystore_alias }}" \
-            -passout pass:{{ wf_keystore_pass }}
-        fi
-      args: { executable: /bin/bash }
-
-    - name: Ensure keystore files owned by wildfly and readable
-      ansible.builtin.file:
-        path: "{{ item.path }}"
-        owner: "{{ wildfly_user }}"
-        group: "{{ wildfly_group }}"
-        mode: "{{ item.mode }}"
-      loop:
-        - { path: "{{ wf_keystore_dir }}",            mode: "0750" }
-        - { path: "{{ wf_keystore_file }}",           mode: "0640" }
-        - { path: "{{ wf_keystore_dir }}/server.crt", mode: "0644" }
-        - { path: "{{ wf_keystore_dir }}/server.key", mode: "0640" }
-
-    - name: Ensure HTTP/HTTPS interfaces exist
-      ansible.builtin.shell: >
-        {{ wildfly_home }}/bin/jboss-cli.sh -c
-        --controller=127.0.0.1:{{ wildfly_mgmt_port }}
-        --user='{{ mgmt_user }}' --password='{{ mgmt_password }}'
-        --command="/interface={{ item }}:add(inet-address={{ wildfly_bind }})"
-      register: iface_cmd
-      changed_when: "iface_cmd.rc == 0"
-      failed_when: "iface_cmd.rc != 0 and ('Duplicate resource' not in (iface_cmd.stdout + iface_cmd.stderr)) and ('WFLYCTL0212' not in (iface_cmd.stdout + iface_cmd.stderr))"
-      loop:
-        - http
-        - https
-      args: { executable: /bin/bash }
-
-    - name: Ensure socket bindings for http/https
-      ansible.builtin.shell: >
-        {{ wildfly_home }}/bin/jboss-cli.sh -c
-        --controller=127.0.0.1:{{ wildfly_mgmt_port }}
-        --user='{{ mgmt_user }}' --password='{{ mgmt_password }}'
-        --command="/socket-binding-group=standard-sockets/socket-binding={{ item.name }}:add(port={{ item.port }},interface={{ item.iface }})"
-      register: sock_cmd
-      changed_when: "sock_cmd.rc == 0"
-      failed_when: "sock_cmd.rc != 0 and ('Duplicate resource' not in (sock_cmd.stdout + sock_cmd.stderr)) and ('WFLYCTL0212' not in (sock_cmd.stdout + sock_cmd.stderr))"
-      loop:
-        - { name: "http",  port: "{{ wildfly_http_port }}",  iface: "http"  }
-        - { name: "https", port: "{{ wildfly_https_port }}", iface: "https" }
-      args: { executable: /bin/bash }
-
-    - name: Ensure Elytron keystore exists
-      ansible.builtin.shell: >
-        {{ wildfly_home }}/bin/jboss-cli.sh -c
-        --controller=127.0.0.1:{{ wildfly_mgmt_port }}
-        --user='{{ mgmt_user }}' --password='{{ mgmt_password }}'
-        --command="/subsystem=elytron/key-store=httpsKS:add(type=PKCS12, path=keystore/keystore.p12, relative-to=jboss.server.config.dir, credential-reference={{'{'}}clear-text=${WF_PASS}{{'}'}})"
-      register: ks_cmd
-      environment:
-        WF_PASS: "{{ wf_keystore_pass }}"
-      changed_when: "ks_cmd.rc == 0"
-      failed_when: "ks_cmd.rc != 0 and ('Duplicate resource' not in (ks_cmd.stdout + ks_cmd.stderr)) and ('WFLYCTL0212' not in (ks_cmd.stdout + ks_cmd.stderr))"
-      args: { executable: /bin/bash }
-
-    - name: Ensure Elytron key-manager exists
-      ansible.builtin.shell: >
-        {{ wildfly_home }}/bin/jboss-cli.sh -c
-        --controller=127.0.0.1:{{ wildfly_mgmt_port }}
-        --user='{{ mgmt_user }}' --password='{{ mgmt_password }}'
-        --command="/subsystem=elytron/key-manager=httpsKM:add(
-          key-store=httpsKS,
-          credential-reference={{'{'}}clear-text=${WF_PASS}{{'}'}},
-          alias-filter={{ wf_keystore_alias }}
-        )"
-      register: km_cmd
-      environment:
-        WF_PASS: "{{ wf_keystore_pass }}"
-      changed_when: "km_cmd.rc == 0"
-      failed_when: "km_cmd.rc != 0 and ('Duplicate resource' not in (km_cmd.stdout + km_cmd.stderr)) and ('WFLYCTL0212' not in (km_cmd.stdout + km_cmd.stderr))"
-      args: { executable: /bin/bash }
-
-    - name: Ensure Elytron server SSL context exists
-      ansible.builtin.shell: >
-        {{ wildfly_home }}/bin/jboss-cli.sh -c
-        --controller=127.0.0.1:{{ wildfly_mgmt_port }}
-        --user='{{ mgmt_user }}' --password='{{ mgmt_password }}'
-        --command="/subsystem=elytron/server-ssl-context=httpsSSC:add(key-manager=httpsKM)"
-      register: ssc_cmd
-      changed_when: "ssc_cmd.rc == 0"
-      failed_when: "ssc_cmd.rc != 0 and ('Duplicate resource' not in (ssc_cmd.stdout + ssc_cmd.stderr)) and ('WFLYCTL0212' not in (ssc_cmd.stdout + ssc_cmd.stderr))"
-      args: { executable: /bin/bash }
-
-    # Undertow listeners: remove any existing, reload & wait, then add ours
-    - name: Remove default Undertow HTTP listener if present
-      ansible.builtin.shell: >
-        {{ wildfly_home }}/bin/jboss-cli.sh -c
-        --controller=127.0.0.1:{{ wildfly_mgmt_port }}
-        --user='{{ mgmt_user }}' --password='{{ mgmt_password }}'
-        --command="/subsystem=undertow/server=default-server/http-listener=default:remove"
-      register: rm_http_default
-      changed_when: "rm_http_default.rc == 0"
-      failed_when: false
-      args: { executable: /bin/bash }
-
-    - name: Remove Undertow HTTP listener named 'http' if present
-      ansible.builtin.shell: >
-        {{ wildfly_home }}/bin/jboss-cli.sh -c
-        --controller=127.0.0.1:{{ wildfly_mgmt_port }}
-        --user='{{ mgmt_user }}' --password='{{ mgmt_password }}'
-        --command="/subsystem=undertow/server=default-server/http-listener=http:remove"
-      register: rm_http_named
-      changed_when: "rm_http_named.rc == 0"
-      failed_when: false
-      args: { executable: /bin/bash }
-
-    - name: Remove default Undertow HTTPS listener if present
-      ansible.builtin.shell: >
-        {{ wildfly_home }}/bin/jboss-cli.sh -c
-        --controller=127.0.0.1:{{ wildfly_mgmt_port }}
-        --user='{{ mgmt_user }}' --password='{{ mgmt_password }}'
-        --command="/subsystem=undertow/server=default-server/https-listener=default:remove"
-      register: rm_https_default
-      changed_when: "rm_https_default.rc == 0"
-      failed_when: false
-      args: { executable: /bin/bash }
-
-    - name: Remove Undertow HTTPS listener named 'https' if present
-      ansible.builtin.shell: >
-        {{ wildfly_home }}/bin/jboss-cli.sh -c
-        --controller=127.0.0.1:{{ wildfly_mgmt_port }}
-        --user='{{ mgmt_user }}' --password='{{ mgmt_password }}'
-        --command="/subsystem=undertow/server=default-server/https-listener=https:remove"
-      register: rm_https_named
-      changed_when: "rm_https_named.rc == 0"
-      failed_when: false
-      args: { executable: /bin/bash }
-
-    - name: Reload WildFly after listener removals
-      ansible.builtin.shell: >
-        {{ wildfly_home }}/bin/jboss-cli.sh -c
-        --controller=127.0.0.1:{{ wildfly_mgmt_port }}
-        --user='{{ mgmt_user }}' --password='{{ mgmt_password }}'
-        --command=":reload"
-      changed_when: true
-      args: { executable: /bin/bash }
-
-    - name: Wait for management port after reload
-      ansible.builtin.wait_for:
-        host: 127.0.0.1
-        port: "{{ wildfly_mgmt_port }}"
-        timeout: 300
-
-    - name: Wait until WildFly server-state is 'running' (post-removal reload)
-      ansible.builtin.shell: >
-        {{ wildfly_home }}/bin/jboss-cli.sh -c
-        --controller=127.0.0.1:{{ wildfly_mgmt_port }}
-        --user='{{ mgmt_user }}' --password='{{ mgmt_password }}'
-        --commands=":read-attribute(name=server-state)"
-      register: server_state_after_rm
-      changed_when: false
-      retries: 30
-      delay: 5
-      until: server_state_after_rm.stdout is search("running")
-      args: { executable: /bin/bash }
-
-    - name: Add Undertow HTTP listener (redirect to HTTPS)
-      ansible.builtin.shell: >
-        {{ wildfly_home }}/bin/jboss-cli.sh -c
-        --controller=127.0.0.1:{{ wildfly_mgmt_port }}
-        --user='{{ mgmt_user }}' --password='{{ mgmt_password }}'
-        --command="/subsystem=undertow/server=default-server/http-listener=http:add(socket-binding=http, redirect-socket=https)"
-      register: u_http_add
-      changed_when: "u_http_add.rc == 0"
-      failed_when: "u_http_add.rc != 0 and ('Duplicate resource' not in (u_http_add.stdout + u_http_add.stderr)) and ('WFLYCTL0212' not in (u_http_add.stdout + u_http_add.stderr))"
-      args: { executable: /bin/bash }
-
-    - name: Add Undertow HTTPS listener
-      ansible.builtin.shell: >
-        {{ wildfly_home }}/bin/jboss-cli.sh -c
-        --controller=127.0.0.1:{{ wildfly_mgmt_port }}
-        --user='{{ mgmt_user }}' --password='{{ mgmt_password }}'
-        --command="/subsystem=undertow/server=default-server/https-listener=https:add(socket-binding=https, ssl-context=httpsSSC)"
-      register: u_https_add
-      changed_when: "u_https_add.rc == 0"
-      failed_when: "u_https_add.rc != 0 and ('Duplicate resource' not in (u_https_add.stdout + u_https_add.stderr)) and ('WFLYCTL0212' not in (u_https_add.stdout + u_https_add.stderr))"
-      args: { executable: /bin/bash }
-
-    - name: Reload WildFly to apply HTTPS/Undertow changes
-      ansible.builtin.shell: >
-        {{ wildfly_home }}/bin/jboss-cli.sh -c
-        --controller=127.0.0.1:{{ wildfly_mgmt_port }}
-        --user='{{ mgmt_user }}' --password='{{ mgmt_password }}'
-        --command=":reload"
-      changed_when: true
-      args: { executable: /bin/bash }
-
-    - name: Wait for management port after final reload
-      ansible.builtin.wait_for:
-        host: 127.0.0.1
-        port: "{{ wildfly_mgmt_port }}"
-        timeout: 300
-
-    - name: Wait until WildFly server-state is 'running' (final)
-      ansible.builtin.shell: >
-        {{ wildfly_home }}/bin/jboss-cli.sh -c
-        --controller=127.0.0.1:{{ wildfly_mgmt_port }}
-        --user='{{ mgmt_user }}' --password='{{ mgmt_password }}'
-        --commands=":read-attribute(name=server-state)"
-      register: server_state_final
-      changed_when: false
-      retries: 30
-      delay: 5
-      until: server_state_final.stdout is search("running")
-      args: { executable: /bin/bash }
-
-    - name: Wait for HTTPS to listen
-      ansible.builtin.wait_for:
-        host: 127.0.0.1
-        port: "{{ wildfly_https_port }}"
-        timeout: 120
-
-    # -------------------- EJBCA source + build --------------------
+    # -------------------- EJBCA source (archive) --------------------
     - name: Ensure EJBCA root dir exists
       ansible.builtin.file:
         path: "{{ ejbca_root }}"
@@ -638,8 +355,8 @@
           datasource.jndi=java:/EjbcaDS
           web.pub.http.port={{ wildfly_http_port }}
           web.pub.https.port={{ wildfly_https_port }}
-          healthcheck.authorizedips={{ healthcheck_authorizedips }}
 
+    # -------------------- Build (no auto-deploy) --------------------
     - name: Build EJBCA (produce dist/ejbca.ear)
       ansible.builtin.shell: |
         set -e
@@ -661,7 +378,7 @@
         msg: "ejbca.ear not found at {{ ejbca_root }}/src/dist/ejbca.ear"
       when: not ejbca_ear.stat.exists
 
-    # -------------------- Deploy EJBCA --------------------
+    # -------------------- Clean & Deploy via WildFly CLI --------------------
     - name: Ensure no stale ejbca.ear deployment remains
       ansible.builtin.shell: >
         {{ wildfly_home }}/bin/jboss-cli.sh -c
@@ -688,6 +405,7 @@
           --user='{{ mgmt_user }}' --password='{{ mgmt_password }}' \
           --commands='deployment-info')"
         echo "$OUT"
+        # Expect a row like: "ejbca.ear  ejbca.ear  true  true  OK"
         echo "$OUT" | awk '$1=="ejbca.ear" && $4=="true" && $5=="OK"{f=1} END{exit(f?0:1)}'
       args: { executable: /bin/bash }
       register: depinfo
@@ -696,7 +414,8 @@
       delay: 6
       until: depinfo.rc == 0
 
-    # -------------------- Post-deploy checks & init --------------------
+
+    # -------------------- Optional: datasource health (again) -----------------
     - name: Test EjbcaDS connection (post-deploy)
       ansible.builtin.shell: >
         {{ wildfly_home }}/bin/jboss-cli.sh -c
@@ -708,6 +427,7 @@
       changed_when: false
       failed_when: dstest2.rc != 0 and ((dstest2.stdout | regex_search('success')) is none)
 
+    # -------------------- Initialize CA (lab-friendly) --------------------
     - name: Initialize a Management CA (non-interactive)
       ansible.builtin.shell: |
         set -e
@@ -743,15 +463,6 @@
         proto: tcp
       loop: ["{{ wildfly_http_port }}", "{{ wildfly_https_port }}"]
       when: ufw_enable
-
-    # -------------------- Output useful URLs --------------------
-    - name: Show URLs
-      ansible.builtin.debug:
-        msg:
-          - "HTTP  UI:  http://{{ ansible_default_ipv4.address }}:{{ wildfly_http_port }}/ejbca/"
-          - "HTTPS UI: https://{{ ansible_default_ipv4.address }}:{{ wildfly_https_port }}/ejbca/"
-          - "AdminWeb: https://{{ ansible_default_ipv4.address }}:{{ wildfly_https_port }}/ejbca/adminweb (needs client cert)"
-          - "Healthcheck: https://{{ ansible_default_ipv4.address }}:{{ wildfly_https_port }}/ejbca/publicweb/healthcheck/ejbcahealth (authorized IPs: {{ healthcheck_authorizedips }})"
 
   handlers:
     - name: Restart WildFly
