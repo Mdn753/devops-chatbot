@@ -535,13 +535,18 @@
         {{ wildfly_home }}/bin/jboss-cli.sh -c
         --controller=127.0.0.1:{{ wildfly_mgmt_port }}
         --user='{{ mgmt_user }}' --password='{{ mgmt_password }}'
-        --command="/subsystem=elytron/key-manager=httpsKM:add(key-store=httpsKS, alias={{ wf_keystore_alias }}, credential-reference={{'{'}}clear-text=${WF_PASS}{{'}'}})"
+        --command="/subsystem=elytron/key-manager=httpsKM:add(
+          key-store=httpsKS,
+          credential-reference={{'{'}}clear-text=${WF_PASS}{{'}'}},
+          alias-filter={{ wf_keystore_alias }}
+        )"
       register: km_cmd
       environment:
         WF_PASS: "{{ wf_keystore_pass }}"
       changed_when: "km_cmd.rc == 0"
       failed_when: "km_cmd.rc != 0 and ('Duplicate resource' not in (km_cmd.stdout + km_cmd.stderr)) and ('WFLYCTL0212' not in (km_cmd.stdout + km_cmd.stderr))"
       args: { executable: /bin/bash }
+
 
     - name: Ensure Elytron server SSL context exists
       ansible.builtin.shell: >
