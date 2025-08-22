@@ -345,6 +345,11 @@
       when: ds_subsys.rc != 0
 
     # -------------------- Install MariaDB driver as a MODULE -------------------
+    - name: Remove existing MariaDB module (clean slate)
+      ansible.builtin.file:
+        path: "{{ wildfly_home }}/modules/system/layers/base/{{ mariadb_module_name | replace('.', '/') }}"
+        state: absent
+
     - name: Create module dir for {{ mariadb_module_name }}
       ansible.builtin.file:
         path: "{{ wildfly_home }}/modules/system/layers/base/{{ mariadb_module_name | replace('.', '/') }}/main"
@@ -360,7 +365,7 @@
         dest: "{{ wildfly_home }}/modules/system/layers/base/{{ mariadb_module_name | replace('.', '/') }}/main/{{ mariadb_driver_file }}"
         mode: "0644"
 
-    - name: Write module.xml for {{ mariadb_module_name }} (with correct JDBC dependencies)
+    - name: Write module.xml for {{ mariadb_module_name }} (with comprehensive JDBC dependencies)
       ansible.builtin.copy:
         dest: "{{ wildfly_home }}/modules/system/layers/base/{{ mariadb_module_name | replace('.', '/') }}/main/module.xml"
         mode: "0644"
@@ -371,14 +376,35 @@
               <resource-root path="{{ mariadb_driver_file }}"/>
             </resources>
             <dependencies>
-              <!-- Required for JDBC drivers -->
+              <!-- Core Java modules -->
+              <module name="java.base"/>
               <module name="java.sql"/>
               <module name="java.logging"/>
               <module name="java.xml"/>
-              <!-- Transaction API for XA support -->
+              <module name="java.naming"/>
+              <!-- Transaction support -->
               <module name="javax.api"/>
+              <module name="javax.transaction.api"/>
+              <!-- WildFly specific modules -->
+              <module name="org.jboss.logging"/>
+              <!-- Optional: for advanced features -->
+              <module name="javax.resource.api" optional="true"/>
             </dependencies>
           </module>
+
+    - name: Verify required modules exist before registering driver
+      ansible.builtin.shell: >
+        {{ wildfly_home }}/bin/jboss-cli.sh -c
+        --controller=127.0.0.1:{{ wildfly_mgmt_port }}
+        --user='{{ mgmt_user }}' --password='{{ mgmt_password }}'
+        '/core-service=module-loading:list-modules'
+      args: { executable: /bin/bash }
+      register: module_list
+      changed_when: false
+
+    - name: Debug available modules (filtered for java.*)
+      ansible.builtin.debug:
+        msg: "{{ module_list.stdout_lines | select('match', '.*java\\..*') | list }}"
 
     - name: Register JDBC driver ({{ mariadb_driver_name }}) from module
       ansible.builtin.shell: >
@@ -392,7 +418,30 @@
         )'
       args: { executable: /bin/bash }
       register: add_driver
-      failed_when: add_driver.rc != 0 and ('already registered' not in add_driver.stdout and 'WFLYCTL0212' not in add_driver.stdout)
+      failed_when: false
+
+    - name: Fallback - Try registering driver without explicit class (auto-detection)
+      ansible.builtin.shell: >
+        {{ wildfly_home }}/bin/jboss-cli.sh -c
+        --controller=127.0.0.1:{{ wildfly_mgmt_port }}
+        --user='{{ mgmt_user }}' --password='{{ mgmt_password }}'
+        '/subsystem=datasources/jdbc-driver={{ mariadb_driver_name }}:add(
+          driver-name="{{ mariadb_driver_name }}",
+          driver-module-name="{{ mariadb_module_name }}"
+        )'
+      args: { executable: /bin/bash }
+      register: add_driver_fallback
+      when: add_driver.rc != 0 and ('already registered' not in add_driver.stdout and 'WFLYCTL0212' not in add_driver.stdout)
+      failed_when: add_driver_fallback.rc != 0 and ('already registered' not in add_driver_fallback.stdout and 'WFLYCTL0212' not in add_driver_fallback.stdout)
+
+    - name: Check if driver registration succeeded
+      ansible.builtin.fail:
+        msg: "Both driver registration attempts failed. Module dependency issue persists."
+      when: 
+        - add_driver.rc != 0 
+        - ('already registered' not in add_driver.stdout and 'WFLYCTL0212' not in add_driver.stdout)
+        - (add_driver_fallback is defined and add_driver_fallback.rc != 0)
+        - (add_driver_fallback is defined and 'already registered' not in add_driver_fallback.stdout and 'WFLYCTL0212' not in add_driver_fallback.stdout)
 
     - name: Verify JDBC driver is present
       ansible.builtin.shell: >
