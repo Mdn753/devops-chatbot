@@ -121,16 +121,17 @@
         remote_src: yes
 
     - name: Provision WildFly {{ wildfly_version }} with EJBCA layers
-      ansible.builtin.shell: |
-        set -e
-        cd /opt/galleon-{{ galleon_version }}/bin
-        ./galleon.sh install wildfly:current#{{ wildfly_version }} \
-          --dir={{ wildfly_dir }} \
-          --default-configs=standalone/standalone.xml \
-          --layers=cloud-server,deployment-scanner,ejb-lite,remoting,resource-adapters,undertow,io,jsf,mail,webservices,-jsonb,-jms-activemq,-observability,-jmx-remoting,-messaging-activemq
-      args: { executable: /bin/bash }
-      creates: "{{ wildfly_dir }}/bin/standalone.sh"
+      ansible.builtin.shell: >
+        ./galleon.sh install wildfly:current#{{ wildfly_version }}
+        --dir={{ wildfly_dir }}
+        --default-configs=standalone/standalone.xml
+        --layers=cloud-server,deployment-scanner,ejb-lite,remoting,resource-adapters,undertow,io,jsf,mail,webservices,-jsonb,-jms-activemq,-observability,-jmx-remoting,-messaging-activemq
+      args:
+        chdir: "/opt/galleon-{{ galleon_version }}/bin"
+        executable: /bin/bash
+        creates: "{{ wildfly_dir }}/bin/standalone.sh"
       register: galleon_install
+
 
     - name: Symlink {{ wildfly_home }} to provisioned WildFly
       ansible.builtin.file:
