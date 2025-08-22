@@ -337,11 +337,12 @@
 
     - name: Recreate EJBCA src dir
       ansible.builtin.file:
-        path: "{{ ejbca_root }}/src}"
+        path: "{{ ejbca_root }}/src"
         state: directory
         owner: "{{ wildfly_user }}"
         group: "{{ wildfly_group }}"
         mode: "0755"
+
 
     - name: Download EJBCA CE source archive
       ansible.builtin.get_url:
