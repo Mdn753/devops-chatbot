@@ -1,5 +1,5 @@
 ---
-- name: Native install of EJBCA CE on Ubuntu (WildFly 32 via Galleon + MariaDB, robust CLI deploy)
+- name: EJBCA CE on Ubuntu (WildFly 32 via Galleon + MariaDB; driver deployed, robust CLI)
   hosts: ejbca
   become: yes
   gather_facts: yes
@@ -11,11 +11,10 @@
     # ===== Versions & Paths =====
     java_pkg: openjdk-17-jdk
 
-    # Use WildFly 32.x for EJBCA 9.x
     wildfly_version: "32.0.0.Final"
     galleon_version: "6.0.0.Final"
     wildfly_dir: "/opt/wildfly-{{ wildfly_version }}"
-    wildfly_home: "/opt/wildfly"        # symlink to current
+    wildfly_home: "/opt/wildfly"   # symlink to current
     wildfly_user: "wildfly"
     wildfly_group: "wildfly"
     wildfly_bind: "0.0.0.0"
@@ -27,18 +26,16 @@
     mgmt_user: "ansible"
     mgmt_password: "ChangeMe!Strong123"
 
-    # EJBCA CE release (pin a tag)
+    # EJBCA CE (pin a tag known to work with WF32)
     ejbca_root: "/opt/ejbca"
     ejbca_ref: "r9.0.0"
     ejbca_archive_url: "https://codeload.github.com/Keyfactor/ejbca-ce/tar.gz/refs/tags/{{ ejbca_ref }}"
 
-    # MariaDB JDBC driver as a WildFly MODULE (robust)
+    # MariaDB JDBC driver (deploy as JAR so driver-name = filename)
     mariadb_driver_version: "3.4.1"
-    mariadb_driver_url: "https://repo1.maven.org/maven2/org/mariadb/jdbc/mariadb-java-client/{{ mariadb_driver_version }}/mariadb-java-client-{{ mariadb_driver_version }}.jar"
-    mariadb_driver_file: "mariadb-java-client-{{ mariadb_driver_version }}.jar"
-    mariadb_module_name: "org.mariadb.jdbc"
+    mariadb_driver_url: "https://dlm.mariadb.com/3852266/Connectors/java/connector-java-{{ mariadb_driver_version }}/mariadb-java-client-{{ mariadb_driver_version }}.jar"
+    mariadb_driver_jar: "mariadb-java-client.jar"   # generic name on disk
     mariadb_driver_class: "org.mariadb.jdbc.Driver"
-    mariadb_driver_name: "mariadb"   # logical name we'll register & use
 
     # ===== Database for EJBCA =====
     db_name: "ejbca"
@@ -344,40 +341,7 @@
       args: { executable: /bin/bash }
       when: ds_subsys.rc != 0
 
-    # -------------------- Install MariaDB driver as a MODULE -------------------
-    - name: Create module dir for {{ mariadb_module_name }}
-      ansible.builtin.file:
-        path: "{{ wildfly_home }}/modules/system/layers/base/{{ mariadb_module_name | replace('.', '/') }}/main"
-        state: directory
-        owner: "{{ wildfly_user }}"
-        group: "{{ wildfly_group }}"
-        mode: "0755"
-        recurse: yes
-
-    - name: Download MariaDB JDBC driver into module dir
-      ansible.builtin.get_url:
-        url: "{{ mariadb_driver_url }}"
-        dest: "{{ wildfly_home }}/modules/system/layers/base/{{ mariadb_module_name | replace('.', '/') }}/main/{{ mariadb_driver_file }}"
-        mode: "0644"
-
-    - name: Write module.xml for {{ mariadb_module_name }}
-      ansible.builtin.copy:
-        dest: "{{ wildfly_home }}/modules/system/layers/base/{{ mariadb_module_name | replace('.', '/') }}/main/module.xml"
-        mode: "0644"
-        content: |
-          <?xml version="1.0" encoding="UTF-8"?>
-          <module xmlns="urn:jboss:module:1.9" name="{{ mariadb_module_name }}">
-            <resources>
-              <resource-root path="{{ mariadb_driver_file }}"/>
-            </resources>
-            <dependencies>
-              <module name="java.sql"/>
-              <module name="org.jboss.logging" optional="true"/>
-              <module name="jakarta.transaction.api" optional="true"/>
-            </dependencies>
-          </module>
-
-    - name: Reload WildFly to pick up new driver module
+    - name: Reload WildFly to apply any pending changes
       ansible.builtin.shell: >
         {{ wildfly_home }}/bin/jboss-cli.sh -c
         --controller=127.0.0.1:{{ wildfly_mgmt_port }}
@@ -385,35 +349,51 @@
         ':reload'
       args: { executable: /bin/bash }
 
-    - name: Wait for management port after reload (driver module)
+    - name: Wait for management port after reload
       ansible.builtin.wait_for:
         host: 127.0.0.1
         port: "{{ wildfly_mgmt_port }}"
         timeout: 150
 
-    - name: Register JDBC driver ({{ mariadb_driver_name }}) from module
+    # -------------------- JDBC driver (deploy, not module) --------------------
+    - name: Ensure deployments dir exists
+      ansible.builtin.file:
+        path: "{{ wildfly_home }}/standalone/deployments"
+        state: directory
+        owner: "{{ wildfly_user }}"
+        group: "{{ wildfly_group }}"
+        mode: "0755"
+
+    - name: Place MariaDB JDBC driver into deployments (generic name)
+      ansible.builtin.get_url:
+        url: "{{ mariadb_driver_url }}"
+        dest: "{{ wildfly_home }}/standalone/deployments/{{ mariadb_driver_jar }}"
+        mode: "0644"
+
+    - name: Trigger deployment scanner for JDBC driver
+      ansible.builtin.file:
+        path: "{{ wildfly_home }}/standalone/deployments/{{ mariadb_driver_jar }}.dodeploy"
+        state: touch
+        mode: "0644"
+
+    - name: Wait until JDBC driver is deployed (.deployed marker)
+      ansible.builtin.wait_for:
+        path: "{{ wildfly_home }}/standalone/deployments/{{ mariadb_driver_jar }}.deployed"
+        timeout: 180
+
+    # Check that driver is visible under the datasources subsystem
+    - name: Verify MariaDB driver is registered (driver-name == filename)
       ansible.builtin.shell: >
         {{ wildfly_home }}/bin/jboss-cli.sh -c
         --controller=127.0.0.1:{{ wildfly_mgmt_port }}
         --user='{{ mgmt_user }}' --password='{{ mgmt_password }}'
-        '/subsystem=datasources/jdbc-driver={{ mariadb_driver_name }}:add(
-          driver-name="{{ mariadb_driver_name }}",
-          driver-module-name="{{ mariadb_module_name }}",
-          driver-class-name="{{ mariadb_driver_class }}"
-        )'
+        '/subsystem=datasources/jdbc-driver={{ mariadb_driver_jar }}:read-resource'
       args: { executable: /bin/bash }
-      register: add_driver
-      failed_when: add_driver.rc != 0 and ('already registered' not in add_driver.stdout)
+      register: driver_check
+      failed_when: driver_check.rc != 0
+      changed_when: false
 
-    - name: Verify JDBC driver is present
-      ansible.builtin.shell: >
-        {{ wildfly_home }}/bin/jboss-cli.sh -c
-        --controller=127.0.0.1:{{ wildfly_mgmt_port }}
-        --user='{{ mgmt_user }}' --password='{{ mgmt_password }}'
-        '/subsystem=datasources/jdbc-driver={{ mariadb_driver_name }}:read-resource'
-      args: { executable: /bin/bash }
-
-    # -------------------- Datasource (DMR add/enable/test) --------------------
+    # -------------------- Datasource (add/enable/test) --------------------
     - name: Remove old EjbcaDS if present (ignore if missing)
       ansible.builtin.shell: >
         {{ wildfly_home }}/bin/jboss-cli.sh -c
@@ -424,24 +404,23 @@
       failed_when: false
       changed_when: false
 
-    - name: Add EjbcaDS (use module-based driver '{{ mariadb_driver_name }}')
+    - name: Add EjbcaDS (use deployed driver '{{ mariadb_driver_jar }}')
       ansible.builtin.shell: >
         {{ wildfly_home }}/bin/jboss-cli.sh -c
         --controller=127.0.0.1:{{ wildfly_mgmt_port }}
         --user='{{ mgmt_user }}' --password='{{ mgmt_password }}'
-        '/subsystem=datasources/data-source=ejbcads:add(
-          jndi-name="java:/EjbcaDS",
-          connection-url="jdbc:mariadb://{{ db_host }}:{{ db_port }}/{{ db_name }}",
-          driver-name="{{ mariadb_driver_name }}",
-          driver-class="{{ mariadb_driver_class }}",
-          user-name="{{ db_user }}",
-          password="{{ db_password }}",
-          min-pool-size=5,
-          max-pool-size=150,
-          validate-on-match=true,
-          background-validation=false,
-          check-valid-connection-sql="select 1;"
-        )'
+        'data-source add
+          --name=ejbcads
+          --jndi-name=java:/EjbcaDS
+          --connection-url=jdbc:mariadb://{{ db_host }}:{{ db_port }}/{{ db_name }}
+          --driver-name={{ mariadb_driver_jar }}
+          --driver-class={{ mariadb_driver_class }}
+          --user-name={{ db_user }}
+          --password={{ db_password }}
+          --min-pool-size=5 --max-pool-size=150
+          --validate-on-match=true
+          --background-validation=false
+          --check-valid-connection-sql="select 1;"'
       args: { executable: /bin/bash }
 
     - name: Enable EjbcaDS
@@ -479,7 +458,7 @@
 
     - name: Recreate EJBCA src dir
       ansible.builtin.file:
-        path: "{{ ejbca_root }}/src }}"
+        path: "{{ ejbca_root }}/src"
         state: directory
         owner: "{{ wildfly_user }}"
         group: "{{ wildfly_group }}"
@@ -514,7 +493,7 @@
         content: |
           database.name=mysql
           database.url=jdbc:mariadb://{{ db_host }}:{{ db_port }}/{{ db_name }}
-          database.driver=org.mariadb.jdbc.Driver
+          database.driver={{ mariadb_driver_class }}
           database.username={{ db_user }}
           database.password={{ db_password }}
           database.maxIdle=10
@@ -581,6 +560,7 @@
               --user='{{ mgmt_user }}' --password='{{ mgmt_password }}' \
               --commands='deployment-info')"
             echo "$OUT"
+            # Expect: ejbca.ear  ejbca.ear  true  true  OK
             echo "$OUT" | awk '$1=="ejbca.ear" && $4=="true" && $5=="OK"{f=1} END{exit(f?0:1)}'
           args: { executable: /bin/bash }
           register: depinfo
