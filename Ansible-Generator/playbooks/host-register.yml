@@ -13,16 +13,16 @@
     - name: Fail early if group is missing or empty
       assert:
         that:
-          - "'Zabbix_server' in groups"
+          - "'Zabbix-server' in groups"
           - groups['Zabbix_server'] | length > 0
         fail_msg: >
-          Inventory group “Zabbix_server” is missing or empty —
+          Inventory group “Zabbix-server” is missing or empty —
           cannot derive zbx_api_url automatically.
 
     - name: Derive API URL once (only when caller didn't supply it)
       set_fact:
         zbx_api_url: >
-          http://{{ hostvars[ groups['Zabbix_server'][0] ].ansible_host }}/zabbix/api_jsonrpc.php
+          http://{{ hostvars[ groups['Zabbix-server'][0] ].ansible_host }}/zabbix/api_jsonrpc.php
       when: (vars.get('zbx_api_url', '') | length) == 0   # raw check – no recursion
       run_once: true
       delegate_to: localhost
