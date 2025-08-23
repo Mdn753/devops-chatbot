@@ -1,6 +1,6 @@
 ---
 - name: Install & configure Zabbix agent
-  hosts: all
+  hosts: "all:!raspberry-vms"
   become: true
 
   ####################################################################
