@@ -14,7 +14,7 @@
       assert:
         that:
           - "'Zabbix-server' in groups"
-          - groups['Zabbix_server'] | length > 0
+          - groups['Zabbix-server'] | length > 0
         fail_msg: >
           Inventory group “Zabbix-server” is missing or empty —
           cannot derive zbx_api_url automatically.
