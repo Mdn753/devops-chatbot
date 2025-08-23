@@ -14,7 +14,7 @@
         # zbx_server_ip: "{{ hostvars['=vm-Zabbix'].ansible_host }}"
 
         # ── OPTION B • first host in group “Zabbix_server” ──────────
-        zbx_server_ip: "{{ hostvars[ groups['Zabbix_server'][0] ].ansible_host }}"
+        zbx_server_ip: "{{ hostvars[ groups['Zabbix-server'][0] ].ansible_host }}"
       when: zbx_server_ip is not defined
       run_once: true
       delegate_to: localhost
