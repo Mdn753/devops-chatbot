@@ -47,10 +47,12 @@ actions:
 slots:
   vm_name:
     type: text
-    influence_conversation: false
+    influence_conversation: true
     mappings:
       - type: from_entity
         entity: vm_name
+        intents: [create_vm, setup_zabbix, setup_GNS3]
+
   repo:
     type: text
     mappings:

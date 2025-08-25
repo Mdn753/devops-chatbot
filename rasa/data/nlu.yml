@@ -13,10 +13,9 @@ nlu:
 # ── infra intents ────────────────────────────────────────────
 - intent: create_vm
   examples: |
-    - spin a new vm
-    - create an ubuntu vm
-    - launch a fresh virtual machine
-    - spin up dev-vm01
+    - create a vm called [devops01](vm_name)
+    - spin up [api-gateway](vm_name)
+    - create [monitor-01](vm_name)
 
 - intent: setup_zabbix
   examples: |

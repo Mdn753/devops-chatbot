@@ -34,7 +34,7 @@ from typing import Any, Dict, List
 from rasa_sdk.events import SlotSet, EventType
 from rasa_sdk.types import DomainDict
 from rasa_sdk.forms import FormValidationAction
-
+import logging
 import os, re, typing as t, requests
 
 
@@ -45,20 +45,52 @@ N8N_ZABBIX_URL = os.getenv("N8N_ZABBIX_URL", f"{N8N_BASE}/webhook-test/zabbix_se
 N8N_PYTHON_PROJECT_URL = os.getenv("N8N_PYTHON_PROJECT_URL", f"{N8N_BASE}/webhook-test/python_project")
 N8N_CREATE_VM_URL = os.getenv("N8N_CREATE_VM_URL", f"{N8N_BASE}/webhook-test/create_vm")
 
+logger = logging.getLogger(__name__)
 
+def vm_from_tracker(tracker: Tracker, prefix: str):
+    """Return (vm_name, was_auto). Try slot first, then entities, else autogen."""
+    raw = (tracker.get_slot("vm_name") or "").strip()
+
+    # fallback: check latest extracted entities
+    if not raw:
+        try:
+            for e in tracker.latest_message.get("entities", []):
+                if e.get("entity") == "vm_name" and e.get("value"):
+                    raw = str(e["value"]).strip()
+                    break
+        except Exception:
+            pass
+
+    if raw:
+        return sanitize(raw), False
+    from random import randint
+    return f"{prefix}-{randint(1000, 9999)}", True
 
 REPO_RX = re.compile(r"^(https?://|git@)[^ \t]+\.git$", re.I)
 class ActionCreateVM(Action):
     def name(self):
         return "action_create_vm"
 
-    async def run(self, dispatcher: CollectingDispatcher,
-                  tracker: Tracker, domain: dict):
-        vm_name = f"vm-{randint(1000,9999)}"
-        r = requests.post(N8N_CREATE_VM_URL, json={"name": vm_name})
-        dispatcher.utter_message(r.json().get("message",
-                             f"Launching {vm_name} …"))
-        return []
+    async def run(self, dispatcher, tracker, domain):
+        vm_name, was_auto = vm_from_tracker(tracker, "vm")
+        payload = {"name": vm_name}
+        logger.info("CREATE_VM payload → %s", payload)
+
+        try:
+            r = requests.post(N8N_CREATE_VM_URL, json=payload, timeout=900)
+            if r.ok:
+                try:
+                    msg = r.json().get("message")
+                except Exception:
+                    msg = r.text[:200] if r.text else None
+                dispatcher.utter_message(msg or f"Launching {vm_name}…")
+            else:
+                dispatcher.utter_message(f"n8n returned {r.status_code}: {r.text[:200]}")
+        except Exception as e:
+            dispatcher.utter_message(f"Failed to reach n8n: {e}")
+
+        return [SlotSet("vm_name", vm_name)]
+
 
 def sanitize(name: str) -> str:
     """Allow letters, numbers, dot, underscore, dash; compress spaces → '-'."""
@@ -72,42 +104,31 @@ class ActionSetupZabbix(Action):
     def name(self) -> str:
         return "action_setup_zabbix"
 
-    async def run(
-        self,
-        dispatcher: CollectingDispatcher,
-        tracker: Tracker,
-        domain: Dict[str, Any],
-    ) -> List[Dict[str, Any]]:
-
-        provided = tracker.get_slot("vm_name")
-        if provided:
-            vm_name = sanitize(provided) or f"zbx-{randint(1000,9999)}"
-            was_auto = False
-        else:
-            vm_name = f"zbx-{randint(1000,9999)}"
-            was_auto = True
-
+    async def run(self, dispatcher: CollectingDispatcher, tracker: Tracker, domain: dict):
+        vm_name, was_auto = vm_from_tracker(tracker, "zbx")
         dispatcher.utter_message(
             f"Provisioning VM '{vm_name}' and installing Zabbix…"
             + (" (auto-generated name)" if was_auto else "")
         )
 
-        try:
-            # Keep payload simple; align with what your n8n flow expects
-            payload = {"name": vm_name, "install": "zabbix", "auto": was_auto}
-            r = requests.post(N8N_ZABBIX_URL, json=payload, timeout=9000000)
+        payload = {"name": vm_name, "install": "zabbix", "auto": was_auto}
+        logger.info("SETUP_ZABBIX payload → %s", payload)
 
+        try:
+            r = requests.post(N8N_ZABBIX_URL, json=payload, timeout=9000000)
             if r.ok:
-                # surface message if JSON, else show text
                 try:
-                    msg = r.json().get("message")
+                    data = r.json()
+                    msg = data.get("message") or data.get("status") or r.text
                 except Exception:
-                    msg = r.text[:200] if r.text else None
-                dispatcher.utter_message(msg or f"Workflow triggered for '{vm_name}'.")
+                    msg = r.text
+                dispatcher.utter_message(msg[:500] if msg else "Zabbix setup request sent.")
             else:
-                dispatcher.utter_message(f"n8n returned {r.status_code}: {r.text[:200]}")
+                dispatcher.utter_message(f"n8n returned {r.status_code}: {r.text[:500]}")
+                logger.error("n8n error (Zabbix): %s %s", r.status_code, r.text)
         except Exception as e:
             dispatcher.utter_message(f"Failed to reach n8n: {e}")
+            logger.exception("HTTP call to n8n failed (Zabbix)")
 
         return [SlotSet("vm_name", vm_name)]
     
@@ -115,44 +136,31 @@ class ActionSetupGNS3(Action):
     def name(self) -> str:
         return "action_setup_GNS3"
 
-    async def run(
-        self,
-        dispatcher: CollectingDispatcher,
-        tracker: Tracker,
-        domain: Dict[str, Any],
-    ) -> List[Dict[str, Any]]:
-        
-        provided = tracker.get_slot("vm_name")
-        if provided:
-            vm_name = sanitize(provided) or f"gns3-{randint(1000,9999)}"
-            was_auto = False
-        else:
-            vm_name = f"gns3-{randint(1000,9999)}"
-            was_auto = True
-
+    async def run(self, dispatcher: CollectingDispatcher, tracker: Tracker, domain: dict):
+        vm_name, was_auto = vm_from_tracker(tracker, "gns3")
         dispatcher.utter_message(
             f"Provisioning VM '{vm_name}' and installing GNS3…"
             + (" (auto-generated name)" if was_auto else "")
         )
 
-        try:
-            payload = {"name": vm_name, "install": "gns3", "auto": was_auto}
-            r = requests.post(
-                N8N_GNS3_URL,
-                json=payload,
-                timeout=9000000
-            )
+        payload = {"name": vm_name, "install": "gns3", "auto": was_auto}
+        logger.info("SETUP_GNS3 payload → %s", payload)
 
+        try:
+            r = requests.post(N8N_GNS3_URL, json=payload, timeout=9000000)
             if r.ok:
                 try:
-                    msg = r.json().get("message")
+                    data = r.json()
+                    msg = data.get("message") or data.get("status") or r.text
                 except Exception:
-                    msg = r.text[:200] if r.text else None
-                dispatcher.utter_message(msg or f"Workflow triggered for '{vm_name}'.")
+                    msg = r.text
+                dispatcher.utter_message(msg[:500] if msg else "GNS3 setup request sent.")
             else:
-                dispatcher.utter_message(f"n8n returned {r.status_code}: {r.text[:200]}")
+                dispatcher.utter_message(f"n8n returned {r.status_code}: {r.text[:500]}")
+                logger.error("n8n error (GNS3): %s %s", r.status_code, r.text)
         except Exception as e:
             dispatcher.utter_message(f"Failed to reach n8n: {e}")
+            logger.exception("HTTP call to n8n failed (GNS3)")
 
         return [SlotSet("vm_name", vm_name)]
 
