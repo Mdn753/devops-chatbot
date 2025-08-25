@@ -364,14 +364,6 @@
           Binaries : /usr/local/bin/ubridge, /usr/local/bin/dynamips, /usr/local/bin/vpcs
           Logs     : journalctl -u gns3 -f
 
-    # Make the IP available to other workflows via AWX fact cache
-    - name: Cache GNS3 API connection info for later workflows
-      set_fact:
-        gns3_api_ip: "{{ ansible_default_ipv4.address }}"
-        gns3_api_port: "{{ gns3_port }}"
-      cacheable: true
-
-
   handlers:
     - name: reload systemd
       systemd:
